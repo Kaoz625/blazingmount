@@ -23,3 +23,12 @@ Next step:
      not), then same slot + mount.conf + one autoload line AFTER ShadowMount. Coordinate with Tokon/smb-link lanes.
 Key files: blazingmount install/host-autostart/*, install/blazingmount-autoload.md; blazing-ps5 docs/GAMES-SECTION-DIGI5.md
 Blockers: on-TV visual proof needs Markus's reboot (RP menu capture is blocked); autoload exercises at his next boot.
+
+---
+## add-from-drives lane (22 Oct 2026 ~17:3x) - what changed in THIS repo (host/)
+- `blazingmount-host.py build ... --merge`: keep the games already in catalog.json, upsert by title id; read-modify-write under a flock; every file renamed into place (a polling console never reads half a catalog/bundle). Without --merge a build still rewrites the catalog to only its own games. (cf6755d)
+- `blazingmount-starter.py --check-only` (one JSON line, same verdict a build reaches, builds nothing) and `--max-starter-mb N` (refuse a "starter" that is most of the game: Ghost of Tsushima / SW Outlaws starters are ~70 GB); `build` passes the cap through. (a82c779)
+- executable modules (.prx/.sprx/.elf/.self, any folder) stay REAL files in the starter: FC27 on DIGI5 died in rtld ("self_load_shared_object: size 0") when two were streamed as 0-byte placeholders (found by digi5-convert). Manifest + --check-only list them as `kept_local`. (605364e)
+- tests: host/test_catalog_merge.py (8), host/test_starter_checks.py (10); `python3 -I host/test_*.py`.
+- KNOWN GAP in this public repo: host/engine lacks mkbackport.py (mkgame.elf_needs imports it) and decrypt_fself comes from outside, so the starter only runs on mac1 with `SMBLINK_TOOLS=~/.blazing/smblink/tools` (what blazing-ps5 tools/add-from-drives.py sets). Fixing that for other devs = vendor an ELF dynamic-section reader and review decrypt_fself's licence first.
+- The house-only site button + worker that USE these live in blazing-games / blazing (add-on) / blazing-ps5 tools/add-from-drives.py; see roku channels .claude/handoff.md "add-from-drives" and memory add-from-my-drives-button.
