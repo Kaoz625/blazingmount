@@ -1,0 +1,6 @@
+# TID	NAME	BUNDLE	CFG  (BlazingMount catalog for blazingmountd)
+# Empty of game rows = nothing NEW to auto-install right now.
+# Each jailbroken PS5 running blazingmountd polls this file every 10 min (POLL_SECS=600) and
+# installs ONLY games it does not already have (the daemon's exists() check skips installed ones).
+# Add a game to the auto-section from the host that holds your drives:
+#   python3 host/blazingmount-host.py build OUT --host-ip <HOST-LAN-IP> --console-fw <FW> --game "<path-to-your-game>"
