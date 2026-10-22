@@ -45,6 +45,11 @@ python3 blazingmount-host.py build /srv/blazingmount \
 python3 blazingmount-host.py serve /srv/blazingmount --port 4460
 ```
 
+`build` writes a catalog of exactly the games named in that call. Add `--merge` to keep the games
+already in the catalog and add (or replace, by title id) only the ones you name - the way to grow
+one catalog a game at a time, or from two tools at once (the catalog is locked while it is read and
+rewritten, and every file is renamed into place so a console polling mid-build never sees half of one).
+
 `blazingmountd` on the console reads `catalog.txt` + the bundles from here and installs every
 game by itself.
 
