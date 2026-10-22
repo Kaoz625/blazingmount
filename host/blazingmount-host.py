@@ -34,11 +34,13 @@ STARTER_BUILDER = os.path.join(HERE, "blazingmount-starter.py")
 DEFAULT_FORK = os.path.join(HERE, "..", "console", "link-fork", "prebuilt", "libSceAmpr.sprx")
 
 
-def build_one(game, host_ip, console_fw, fork, out):
+def build_one(game, host_ip, console_fw, fork, out, max_starter_mb=None):
     work = tempfile.mkdtemp(prefix="bm-host-")
     try:
-        subprocess.run([sys.executable, "-I", STARTER_BUILDER, game, work, "--fork", fork,
-                        "--console-fw", str(console_fw)], check=True)
+        cmd = [sys.executable, "-I", STARTER_BUILDER, game, work, "--fork", fork, "--console-fw", str(console_fw)]
+        if max_starter_mb is not None:
+            cmd += ["--max-starter-mb", str(max_starter_mb)]
+        subprocess.run(cmd, check=True)
         starters = os.path.join(work, "starter")
         name = os.listdir(starters)[0]
         tid = re.search(r"\(([A-Z]{4}\d{5})\)", name).group(1)
@@ -127,7 +129,7 @@ def cmd_build(a):
     built = []
     for g in a.game:
         print("=== building", g)
-        built.append(build_one(g, a.host_ip, a.console_fw, a.fork, a.out))
+        built.append(build_one(g, a.host_ip, a.console_fw, a.fork, a.out, a.max_starter_mb))
     with catalog_lock(a.out):
         games = merge_games(read_catalog(a.out), built) if a.merge else built
         write_catalog(a.out, a.host_ip, games)
@@ -151,6 +153,8 @@ def main():
     b.add_argument("--console-fw", type=float, required=True)
     b.add_argument("--game", action="append", required=True)
     b.add_argument("--fork", default=DEFAULT_FORK)
+    b.add_argument("--max-starter-mb", type=int, default=None,
+                   help="refuse a game whose starter (what the console stores) would be bigger than this many MB")
     b.add_argument("--merge", action="store_true",
                    help="keep the games already in OUT/catalog.json; add or replace only the ones named here")
     b.set_defaults(func=cmd_build)

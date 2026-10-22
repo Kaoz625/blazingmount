@@ -32,6 +32,11 @@ python3 blazingmount-starter.py \
 Produces `/tmp/mound-out/starter/<Name (TID)>/` (the console folder) and `<TID>.cfg` (the link
 config). It **refuses** a game whose required firmware is newer than `--console-fw`.
 
+`--check-only` builds nothing and prints one JSON line with the same verdict a real build would reach
+(`ok`, `refusal`, `starter_bytes`, `remote_bytes`, ...). `--max-starter-mb N` refuses a game whose starter
+(what the console would actually store) is bigger than N MB - a starter that is most of the game is not a
+streaming starter; `blazingmount-host.py build` passes it through.
+
 Normally you don't call this directly — `install/blazingmount-install.py` runs it for you and
 pushes the result to the console.
 

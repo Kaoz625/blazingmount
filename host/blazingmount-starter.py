@@ -15,6 +15,11 @@ exactly like the proven PHAT5 pipeline, minus the FW re-sign (not needed when co
       SRC   image name under imgserve (".ffpfsc") or a game folder under dirserve
       OUT   fresh output dir: OUT/starter/<Name (TID)>/ , OUT/<TID>.cfg , OUT/<TID>.json
       --console-fw  the target console's firmware; REFUSES if the game needs a newer FW
+      --max-starter-mb N   REFUSES a game whose starter (what is stored on the console) would be bigger
+                    than N MB: a game with more than 1024 big files keeps the extra ones in the starter,
+                    and a starter that is most of the game is not a streaming starter
+      --check-only  build nothing: run the same checks and print ONE json line {ok, refusal, tid, name,
+                    fw, starter_bytes, remote_bytes, remote_files, verdict}; exit 0 whenever the checker ran
 """
 import argparse, hashlib, json, os, shutil, sys
 
@@ -25,6 +30,24 @@ import mkgame        # noqa: E402  (host/engine)
 import amprindex     # noqa: E402  (host/engine)
 
 
+def refusal_for(r, console_fw, max_starter_mb=None):
+    """Why this game cannot be a streaming starter on this console, or None when it can.
+    `r` is mkgame.check()'s result. The texts are what main() has always said ("refusing: ...")."""
+    if not r.get("tid"):
+        return "no title id (sce_sys/param.json missing?)"
+    if not r.get("loads_libSceAmpr"):
+        return r["verdict"][0]
+    gfw = r.get("fw")
+    if gfw and gfw > console_fw:
+        return ("%s needs FW %s but the console is %s - this native builder does NOT backport "
+                "(use mkgame.py make for a lower-FW console)" % (r.get("name"), gfw, console_fw))
+    if max_starter_mb is not None and r.get("starter_bytes", 0) > max_starter_mb * 1000000:
+        return ("the starter would be %.1f GB (limit %.1f GB): too much of this game is in files the link does not stream "
+                "(more than 1024 big files, or very many small ones), so it would be stored on the console"
+                % (r["starter_bytes"] / 1e9, max_starter_mb / 1000.0))
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("src")
@@ -32,17 +55,22 @@ def main():
     ap.add_argument("--fork", required=True, help="path to the libSceAmpr.sprx link fork")
     ap.add_argument("--console-fw", type=float, required=True, help="target console firmware (e.g. 13.60)")
     ap.add_argument("--min-mb", type=int, default=1)
+    ap.add_argument("--max-starter-mb", type=int, default=None,
+                    help="refuse a game whose starter (what the console stores) would be bigger than this")
+    ap.add_argument("--check-only", action="store_true",
+                    help="build nothing: print one json line with the checker's verdict and exit 0")
     a = ap.parse_args()
 
     src, files, r = mkgame.check(a.src, a.min_mb, quiet=True)
-    if not r.get("tid"):
-        sys.exit("no title id (sce_sys/param.json missing?)")
-    if not r["loads_libSceAmpr"]:
-        sys.exit("refusing: " + r["verdict"][0])
+    why = refusal_for(r, a.console_fw, a.max_starter_mb)
+    if a.check_only:
+        print(json.dumps({"ok": why is None, "refusal": why, "tid": r.get("tid"), "name": r.get("name"), "fw": r.get("fw"),
+                          "console_fw": a.console_fw, "starter_bytes": r.get("starter_bytes"), "remote_bytes": r.get("remote_bytes"),
+                          "remote_files": len(r.get("remote", ())), "verdict": r.get("verdict")}))
+        return
+    if why:
+        sys.exit(("" if why.startswith("no title id") else "refusing: ") + why)
     gfw = r.get("fw")
-    if gfw and gfw > a.console_fw:
-        sys.exit("refusing: %s needs FW %s but the console is %s - this native builder does NOT backport "
-                 "(use mkgame.py make for a lower-FW console)" % (r.get("name"), gfw, a.console_fw))
 
     tid = r["tid"]
     name = "%s (%s)" % ((r.get("name") or tid).replace("/", " ").replace(":", "").strip(), tid)
