@@ -32,6 +32,10 @@ python3 blazingmount-starter.py \
 Produces `/tmp/mound-out/starter/<Name (TID)>/` (the console folder) and `<TID>.cfg` (the link
 config). It **refuses** a game whose required firmware is newer than `--console-fw`.
 
+Executable modules (`.prx`, `.sprx`, `.elf`, `.self`) are always kept as real files in the starter, wherever they sit in the game:
+the game's own loader opens them straight from `/app0`, and a 0-byte placeholder there kills the launch at once
+(`rtld self_load_shared_object: size 0`, EA SPORTS FC 27, 22 Oct 2026). Their names are listed as `kept_local` in the manifest.
+
 `--check-only` builds nothing and prints one JSON line with the same verdict a real build would reach
 (`ok`, `refusal`, `starter_bytes`, `remote_bytes`, ...). `--max-starter-mb N` refuses a game whose starter
 (what the console would actually store) is bigger than N MB - a starter that is most of the game is not a

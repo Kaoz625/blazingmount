@@ -30,6 +30,26 @@ import mkgame        # noqa: E402  (host/engine)
 import amprindex     # noqa: E402  (host/engine)
 
 
+# Executable modules the game's own loader opens straight from /app0. A 0-byte placeholder there makes the launch die at once
+# ("rtld self_load_shared_object: size 0": EA SPORTS FC 27, 22 Oct 2026 - Engine.Render.Core2.PlatformPs5.prx and
+# Engine.MovieVLC.LibVLC.prx sit in the game root, outside sce_module/ and prx/, so mkgame.check() counted them as "big" and
+# turned them into streamed placeholders). They stay real files in the starter: they are a few MB each.
+MODULE_EXT = (".prx", ".sprx", ".elf", ".self")
+
+
+def keep_modules_local(r):
+    """Move executable modules out of the streamed set r["remote"] and into the starter, updating the byte counts the size
+    cap and the manifest use. Returns the names kept (also stored as r["kept_local"]). A no-op when there are none."""
+    kept = [f for f in r.get("remote", ()) if f[0].lower().endswith(MODULE_EXT)]
+    if not kept:
+        return []
+    r["remote"] = [f for f in r["remote"] if f not in kept]
+    r["remote_bytes"] = sum(sz for _, sz in r["remote"])
+    r["starter_bytes"] = r.get("starter_bytes", 0) + sum(sz for _, sz in kept)
+    r["kept_local"] = [f[0] for f in kept]
+    return r["kept_local"]
+
+
 def refusal_for(r, console_fw, max_starter_mb=None):
     """Why this game cannot be a streaming starter on this console, or None when it can.
     `r` is mkgame.check()'s result. The texts are what main() has always said ("refusing: ...")."""
@@ -62,11 +82,12 @@ def main():
     a = ap.parse_args()
 
     src, files, r = mkgame.check(a.src, a.min_mb, quiet=True)
+    keep_modules_local(r)                       # before the size cap and before any placeholder is made
     why = refusal_for(r, a.console_fw, a.max_starter_mb)
     if a.check_only:
         print(json.dumps({"ok": why is None, "refusal": why, "tid": r.get("tid"), "name": r.get("name"), "fw": r.get("fw"),
                           "console_fw": a.console_fw, "starter_bytes": r.get("starter_bytes"), "remote_bytes": r.get("remote_bytes"),
-                          "remote_files": len(r.get("remote", ())), "verdict": r.get("verdict")}))
+                          "remote_files": len(r.get("remote", ())), "kept_local": r.get("kept_local", []), "verdict": r.get("verdict")}))
         return
     if why:
         sys.exit(("" if why.startswith("no title id") else "refusing: ") + why)
@@ -114,7 +135,7 @@ def main():
     sz = sum(os.path.getsize(os.path.join(dp, n)) for dp, dn, fn in os.walk(starter) for n in fn)
     manifest = {"tid": tid, "name": r.get("name"), "version": r.get("version"), "fw": gfw,
                 "console_fw": a.console_fw, "src": a.src, "kind": src.kind, "starter": name,
-                "starter_bytes": sz, "remote_files": len(remote), "remote_bytes": r["remote_bytes"],
+                "starter_bytes": sz, "remote_files": len(remote), "remote_bytes": r["remote_bytes"], "kept_local": r.get("kept_local", []),
                 "fork_sha256": hashlib.sha256(open(a.fork, "rb").read()).hexdigest()}
     json.dump(manifest, open(os.path.join(a.out, tid + ".json"), "w"), indent=1)
     print(json.dumps({k: manifest[k] for k in ("tid", "name", "fw", "console_fw", "starter", "remote_files", "remote_bytes")}, indent=1))

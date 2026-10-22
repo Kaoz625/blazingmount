@@ -51,5 +51,44 @@ class RefusalTests(unittest.TestCase):
         self.assertEqual(bm.refusal_for(both, 13.60, 2048), "no link")
 
 
+class KeepModulesLocalTests(unittest.TestCase):
+    """EA SPORTS FC 27, 22 Oct 2026: the builder streamed two executable modules from the game root as 0-byte placeholders and the
+    launch died in rtld ('self_load_shared_object: size 0'). Executable modules stay real files in the starter."""
+
+    def game(self):
+        return {"tid": "PPSA34015", "name": "EA SPORTS FC 27", "loads_libSceAmpr": True, "fw": 6.5, "verdict": ["can stream"],
+                "starter_bytes": 425_000_000, "remote_bytes": 0,
+                "remote": [("data/pak0.big", 40_000_000_000), ("Engine.Render.Core2.PlatformPs5.prx", 3_925_528),
+                           ("Engine.MovieVLC.LibVLC.prx", 3_339_443), ("PS5/Party.prx", 8_421_881), ("PS5/Party.prx.esbak", 8_421_881),
+                           ("movie/intro.sprx", 1_500_000), ("tools/helper.ELF", 2_000_000), ("data/pak1.big", 9_000_000_000)]}
+
+    def test_modules_leave_the_streamed_set_and_join_the_starter(self):
+        r = self.game()
+        kept = bm.keep_modules_local(r)
+        self.assertEqual(sorted(kept), sorted(["Engine.Render.Core2.PlatformPs5.prx", "Engine.MovieVLC.LibVLC.prx", "PS5/Party.prx",
+                                               "movie/intro.sprx", "tools/helper.ELF"]), "any case of the extension, any folder")
+        self.assertEqual([f[0] for f in r["remote"]], ["data/pak0.big", "PS5/Party.prx.esbak", "data/pak1.big"],
+                         ".esbak is a backup of a module, not a module: still streamed")
+        self.assertEqual(r["remote_bytes"], 40_000_000_000 + 8_421_881 + 9_000_000_000)
+        self.assertEqual(r["starter_bytes"], 425_000_000 + 3_925_528 + 3_339_443 + 8_421_881 + 1_500_000 + 2_000_000)
+        self.assertEqual(r["kept_local"], kept)
+
+    def test_nothing_to_keep_changes_nothing(self):
+        r = {"remote": [("data/pak0.big", 1), ("data/pak1.big", 2)], "remote_bytes": 3, "starter_bytes": 10}
+        self.assertEqual(bm.keep_modules_local(r), [])
+        self.assertEqual(r, {"remote": [("data/pak0.big", 1), ("data/pak1.big", 2)], "remote_bytes": 3, "starter_bytes": 10})
+
+    def test_the_size_cap_counts_the_modules_that_stay_on_the_console(self):
+        r = {"tid": "PPSA1", "loads_libSceAmpr": True, "fw": 6.5, "verdict": [], "starter_bytes": 1_900_000_000,
+             "remote": [("data/pak0.big", 9_000_000_000), ("Big.prx", 300_000_000)]}
+        self.assertIsNone(bm.refusal_for(r, 13.60, 2048), "before: under the cap")
+        bm.keep_modules_local(r)
+        self.assertIn("starter would be 2.2 GB", bm.refusal_for(r, 13.60, 2048), "after: the module is on the console, so the cap sees it")
+
+    def test_a_game_with_no_remote_key_is_left_alone(self):
+        r = {"starter_bytes": 5}
+        self.assertEqual(bm.keep_modules_local(r), [])
+
+
 if __name__ == "__main__":
     unittest.main()
