@@ -17,10 +17,11 @@ exactly like the proven PHAT5 pipeline, minus the FW re-sign (not needed when co
 """
 import argparse, hashlib, json, os, shutil, sys
 
-SMBLINK_TOOLS = os.environ.get("SMBLINK_TOOLS", os.path.expanduser("~/.blazing/smblink/tools"))
-sys.path.insert(0, SMBLINK_TOOLS)
-import mkgame        # noqa: E402  (smblink)
-import amprindex     # noqa: E402  (smblink)
+# the streaming-engine helpers (mkgame/amprindex) are vendored in host/engine/; override with $SMBLINK_TOOLS
+ENGINE = os.environ.get("SMBLINK_TOOLS", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine"))
+sys.path.insert(0, ENGINE)
+import mkgame        # noqa: E402  (host/engine)
+import amprindex     # noqa: E402  (host/engine)
 
 
 def main():

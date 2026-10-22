@@ -51,4 +51,12 @@ game by itself.
 ## engine/
 
 `mkgame.py`, `amprindex.py`, `mkstub.py`, `pconsole.py` — the streaming engine's host helpers
-that the builders reuse (sizes/index/stub logic). You don't call them directly.
+that the builders reuse (sizes/index/stub logic). You don't call them directly;
+`blazingmount-starter.py` imports them from here automatically.
+
+**Adjust for your host:** `engine/mkgame.py` has a few constants from the reference setup —
+`IMGSERVE` (default `http://127.0.0.1:4451`, the local image server), `DRIVE5_DL` /
+`DIRSERVE_ROOT` (where your drives are mounted), and `MAC1_LAN` (the server IP written into a
+cfg — the installer overrides this with `--host-ip`, so it only matters if you build cfgs by
+hand). Point them at your own paths. The backport-related constants are unused on the native
+path this tool uses (it refuses a game that needs newer firmware than the console).
