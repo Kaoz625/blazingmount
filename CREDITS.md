@@ -8,7 +8,7 @@ them and records the license position. The pre-release checklist at the bottom i
 
 | Component | Role | How we use it | License |
 |-----------|------|---------------|---------|
-| **drakmor/ampr_emu** | base of the `libSceAmpr.sprx` link fork (the demand-paging streaming engine) | we ship **our patches** (`console/link-fork/module/`) and a build recipe that clones ampr_emu at pinned commit `cfa85df379f6eeeb165d7badf9b648e266fe77b7` and overlays them. We do **not** redistribute ampr_emu's source or any built binary. | **GPL-3.0** |
+| **drakmor/ampr_emu (https://github.com/drakmor/ampr_emu, commit cfa85df)** | base of the `libSceAmpr.sprx` link fork (the demand-paging streaming engine) | we ship **our patches** (`console/link-fork/module/`) and a build recipe that clones ampr_emu at pinned commit `cfa85df379f6eeeb165d7badf9b648e266fe77b7` and overlays them. We do **not** redistribute ampr_emu's source or any built binary. | **GPL-3.0** |
 | **ShadowMount Plus** | registers a starter folder as a home-screen tile and overlays its `fakelib/`. External runtime dependency — **not vendored, not re-hosted**. Install it yourself from its author's release. | runtime | author's terms |
 | **PS5 homebrew launcher** (idlesauce) | auto-scans `/data/homebrew` for homebrew tiles. External, referenced only. | runtime | author's terms |
 | **ps-neighborhood** `PS5PKGTool.Ffpfsc` / `Ufs2` | imgserve's on-demand `.ffpfsc` + exFAT/UFS2 decoder. **External build dependency — not vendored**; obtain a checkout and set `FFPFSC_SRC` (dirserve for game *folders* needs none of this). | build (imgserve) | **GPL-3.0** |
