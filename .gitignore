@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS / editors
+.DS_Store
+*.swp
+
+# build outputs
+bin/
+obj/
+out/
+*.o
+*.elf.map
+
+# built starters / bundles / catalogs (host output — never commit)
+starters/
+bundles/
+catalog.json
+*.starter.tar
+
+# SAFETY: never commit game or homebrew content, decrypted files, or packages
+*.ffpfsc
+*.pfs
+*.pkg
+*.fpkg
+*.ffpkg
+*.exfat
+*.iso
+*.ucas
+*.utoc
+*.pak
+eboot.bin
+decrypted/
+
+# the only intentional binary is console/link-fork/prebuilt/libSceAmpr.sprx (GPL-3 fork, no game data)
+!console/link-fork/prebuilt/libSceAmpr.sprx

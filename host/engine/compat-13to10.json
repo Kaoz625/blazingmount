@@ -1,0 +1,23 @@
+{
+  "_about": "mkbackport.py --compat: imports a FW 11-13 game needs that PHAT5 (10.20) lacks, pointed at a 10.20 libkernel export (getpid = HoLVWNanBBc, exported in library 'libkernel'). Only for calls whose result the game does not need. Found for Samson PPSA38474 on 21 Oct 2026 (nidgap.py vs PHAT5's own libs; D5 13.60 code read with r2). Not listed = left unresolved on purpose: dFym5b41JLU / XgVs4jRehcY (narrow timed umtx waits in libc.prx, only reachable through libc exports XDmCPWa3MEo / vsw4c+uWXGQ that no game file imports) and La9uyZv4Kvw (cpu-mask getter in libSceJobManager.prx, a module the eboot does not load).",
+  "NH6xARDOVv8": {
+    "name": "sceKernelGetOperationMode(int *mode, int *flag) (name proven by NID hash)",
+    "to": "HoLVWNanBBc", "to_name": "getpid", "lib": "libkernel", "module": "libkernel",
+    "why": "void function. All 11 call sites in Samson's eboot only test flag == 1 (then they use the reduced 0xff cpu mask instead of 0x1fff); none reads mode. With getpid the outputs stay as the caller left them, so the game keeps its normal mask (or at worst uses 8 threads). D5 13.60 code: getpid + d7xu4QDJw8Q(pid, buf, 0x98), mode = {2,0,1,3}[byte], flag = 0/1."
+  },
+  "qBS714-Jr3g": {
+    "name": "libSceLibcInternalExt: the body of __cxa_thread_atexit (libc.prx BKSCW2bCACA is only a call to it)",
+    "to": "HoLVWNanBBc", "to_name": "getpid", "lib": "libkernel", "module": "libkernel",
+    "why": "thread_local destructors are then not registered (they would only run when a thread exits); the compiler-made caller ignores the return value. SDK 13 libc.prx moved the body into the system library; PHAT5's libSceLibcInternal does not export it."
+  },
+  "OQ-dzhlnM28": {
+    "name": "libSceLibcInternalExt: a hook exit() calls (no args, result ignored) before __cxa_finalize and _exit",
+    "to": "HoLVWNanBBc", "to_name": "getpid", "lib": "libkernel", "module": "libkernel",
+    "why": "exit path only; exit() still finalizes and calls _exit after it."
+  },
+  "tB59hFLH3SA": {
+    "name": "libSceLibcInternalExt: called from __cxa_finalize (one int arg, result ignored)",
+    "to": "HoLVWNanBBc", "to_name": "getpid", "lib": "libkernel", "module": "libkernel",
+    "why": "module unload / exit path only."
+  }
+}
