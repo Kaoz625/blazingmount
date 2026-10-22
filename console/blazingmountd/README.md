@@ -5,10 +5,14 @@ the console: at boot it reads a catalog from your host, installs any games it ha
 (fetch bundle → extract → drop the fork → write the link config), and lets ShadowMount Plus
 register the tiles. Then the games stream from your host when launched.
 
-> **Status: reference implementation, on-console test pending.** The source is complete and
-> deliberately small/POSIX-plain so other devs can build and fix it. Until it's verified on a
-> console, use the proven host-assisted path (`install/blazingmount-install.py`), which does
-> the same steps from the host.
+> **Status: built and proven on-console.** Built with the PS5 payload SDK and run on a jailbroken
+> PS5 (DIGI5, FW 13.60): it read `/data/blazing/mount.conf`, fetched a host catalog over HTTP,
+> installed a bundle (untar → `/data/homebrew/<name>/`), dropped the fork into the game's
+> `fakelib/`, and wrote `/data/blazing/link/<TID>.cfg` — the fully-autonomous "no setup script"
+> path (see `docs/PROOF-DIGI5.md`). Run it one-shot with `blazingmountd once`, or resident by
+> adding the autoload line (your call). The host-assisted `install/blazingmount-install.py`
+> remains the per-game alternative. The source is deliberately small/POSIX-plain so other devs
+> can build and improve it.
 
 ## How it works
 

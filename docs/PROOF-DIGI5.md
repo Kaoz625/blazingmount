@@ -47,5 +47,31 @@ Launched from the tile. The link fork loaded and streamed:
 **Result:** the console showed the game and played it, streamed on demand from the host,
 with the full image never copied to the console and **zero stream errors**.
 
-> Reproduce with your own legally-owned game:
-> `python3 install/blazingmount-install.py --console <ip> --host-ip <ip> --game "<your image>" --console-fw <fw>`
+### 4. The autonomous daemon installed a game by itself (blazingmountd)
+
+`blazingmountd` was built with the PS5 payload SDK and run on the same console in one-shot mode
+(`blazingmountd once`) against a small host catalog. It read `/data/blazing/mount.conf` and acted
+on its own — the host's server log shows the console fetching by itself:
+
+```
+192.168.1.60 - GET /catalog.txt HTTP/1.0 200
+192.168.1.60 - GET /bundles/<TID>.starter.tar HTTP/1.0 200
+192.168.1.60 - GET /cfg/<TID>.cfg HTTP/1.0 200
+```
+
+Its log (`/data/blazing/blazingmountd.log`):
+
+```
+blazingmountd once
+installing <name> (<TID>)
+  done: <name> -> tile (ShadowMount) + link /data/blazing/link/<TID>.cfg
+```
+
+Afterwards, on the console: the bundle was untarred to `/data/homebrew/<name>/`, the fork was in
+`<name>/fakelib/libSceAmpr.sprx`, and `/data/blazing/link/<TID>.cfg` was written — with **no
+computer driving the console**. Combined with the ShadowMount registration and streaming proven
+above, this is the fully-autonomous "no setup script" path.
+
+> Reproduce with your own legally-owned games:
+> - per game: `python3 install/blazingmount-install.py --console <ip> --host-ip <ip> --game "<your image>" --console-fw <fw>`
+> - autonomous: build a catalog with `host/blazingmount-host.py`, point `blazingmountd` at it, and it installs everything by itself.

@@ -62,8 +62,10 @@ static long http_get(const char *host, int port, const char *path, char **out) {
         len += n;
     }
     close(s);
-    // split headers / body, require a 2xx status
-    char *hdr_end = memmem(buf, len, "\r\n\r\n", 4);
+    // split headers / body, require a 2xx status (manual scan: the SDK libc has no memmem)
+    char *hdr_end = 0;
+    for (size_t i = 0; i + 4 <= len; i++)
+        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') { hdr_end = buf + i; break; }
     if (!hdr_end || strncmp(buf, "HTTP/1.", 7) || (buf[9] != '2')) { free(buf); return -1; }
     size_t body_off = (hdr_end - buf) + 4, body_len = len - body_off;
     memmove(buf, buf + body_off, body_len);
@@ -137,7 +139,7 @@ static void install_game(const char *host, int port, char *line) {
     long n = http_get(host, port, path, &body);
     if (n < 0) { logln("  bundle fetch failed"); return; }
 
-    char stage[1024]; snprintf(stage, sizeof stage, "/data/blz-stage/bm/%s", name);
+    const char *stage = "/data/blz-stage/bm";     // the bundle tar carries the top-level <name>/ dir
     makedirs(stage);
     if (untar(stage, body, n) != 0) { free(body); logln("  untar failed"); return; }
     free(body);
@@ -181,8 +183,13 @@ static void sync_once(void) {
     free(cat);
 }
 
-int main(void) {
-    logln("blazingmountd start");
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "once") == 0) {   // one-shot: sync from the catalog, then exit (manual runs / tests)
+        logln("blazingmountd once");
+        sync_once();
+        return 0;
+    }
+    logln("blazingmountd start");                      // resident (autoload): sync now and every POLL_SECS
     for (;;) {
         sync_once();
         sleep(POLL_SECS);

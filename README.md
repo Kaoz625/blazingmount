@@ -100,13 +100,13 @@ downgrade/re-sign a game; it plays your games natively). See `docs/SUPPORTED-FOR
 
 ## Status
 
-- **Proven**: the host starter builder, the `libSceAmpr.sprx` link fork, and the
-  host-assisted installer. First end-to-end proof is in `docs/PROOF-DIGI5.md`
-  (a game registered + played, streamed with 0 errors, on a stock-firmware console).
-- **Reference, build pending**: `console/blazingmountd` (the fully-autonomous
-  on-console discovery daemon) — source + build recipe are here; it is built with the
-  PS5 payload SDK and still wants an on-console test. The installer is the working path
-  meanwhile.
+- **Proven**: the host starter builder, the `libSceAmpr.sprx` link fork, the host-assisted
+  installer, **and `console/blazingmountd`** — built with the PS5 payload SDK and run on a
+  jailbroken PS5, where it fetched a host catalog and installed a game by itself. End-to-end
+  proof (a game registered + played, streamed with 0 errors, plus the autonomous daemon run) is
+  in `docs/PROOF-DIGI5.md`.
+- **Your call to activate**: making `blazingmountd` resident is one autoload line
+  (`install/blazingmount-autoload.md`); the host-assisted installer needs no autoload.
 
 ## License & credits
 
