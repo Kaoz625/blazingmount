@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // blz_link_hooks.h - the C entry points the patched AMPR emulator sources call (tools/smblink/tools/ampr_link_apply.py inserts the calls). Implemented in blz_link_game.cpp.
 // Every function is a cheap no-op until the link is configured for the running title (no /data/blazing/link/<TID>.cfg = stock behaviour).
 #pragma once

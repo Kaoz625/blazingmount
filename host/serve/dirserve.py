@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """dirserve.py - read-only HTTP Range server for plain GAME FOLDERS (the folder twin of imgserve, smb-link, 21 Oct 2026).
 
     python3 -I tools/imgserve/dirserve.py <root> [<root> ...] [--port 4452] [--bind 0.0.0.0] [--depth 4]

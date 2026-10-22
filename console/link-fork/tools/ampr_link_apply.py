@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """ampr_link_apply.py - overlay the PS5 SMB link (tools/smblink/module) onto a clean checkout of drakmor/ampr_emu (GPL-3) at the pinned commit.
 
     python3 -I ampr_link_apply.py <ampr_emu checkout> <module dir (tools/smblink/module)> [--no-git-check]

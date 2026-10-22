@@ -1,8 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
-  <!-- imgserve (tokon-mod-3, 20 Oct 2026): read-only HTTP Range server for the FILES INSIDE .ffpfsc game images that live on a drive of the machine it runs on
-       (mac1: /Volumes/Untitled, /Volumes/My Book). It decodes the PFSC blocks and the inner exFAT/UFS2 filesystem on demand with ps-neighborhood's
-       PS5PKGTool.Ffpfsc (GPL-3.0, like tools/tokonport/imgpull), so a game stays ONE compressed image on the drive and a PS5 can still read any inner
-       file range over the LAN (the link of HOOK-PLAN job 2). Build with build.sh (it points FfpfscProj at the vendored source). -->
+  <!-- imgserve: read-only HTTP Range server for the FILES INSIDE .ffpfsc game images on a drive of the
+       machine it runs on. It decodes the PFSC blocks and the inner exFAT/UFS2 filesystem on demand using
+       ps-neighborhood's PS5PKGTool.Ffpfsc (GPL-3.0, an EXTERNAL build dependency - see CREDITS.md), so a
+       game stays ONE compressed image on the drive and a PS5 can still read any inner file range over the
+       LAN. Build with build.sh and point FFPFSC_SRC at your ps-neighborhood checkout. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 # mkstub.py - build a STUB folder of a game that lives in a .ffpfsc image served by tools/imgserve: every inner file is downloaded, except the
 # listed big ones, which become 0-byte placeholders (the SMB link serves them). Sizes are checked against imgserve's listing.
 #   python3 mkstub.py HOST PORT IMAGE OUTDIR BIG1,BIG2,...

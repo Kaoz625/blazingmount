@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """blazingmount-install.py - mount ONE game from your host onto a jailbroken PS5, reboot-surviving.
 
 This is the proven, host-assisted path: it builds a native streaming starter from a game on your
@@ -10,7 +11,7 @@ reads (your network drive).
 Run ON the host (the machine that holds your drives and runs imgserve/dirserve).
 
     python3 install/blazingmount-install.py \
-        --console 192.168.1.39 --host-ip 192.168.1.130 \
+        --console 192.168.1.60 --host-ip 192.168.1.50 \
         --game "The Mound - Omen of Cthulhu (PPSA26223).ffpfsc" \
         --console-fw 13.60
 

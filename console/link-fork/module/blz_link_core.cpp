@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // blz_link_core.cpp - platform-free engine of the PS5 SMB link. See blz_link.h. No allocation except one malloc each for the block cache and the verify buffer (both
 // libc imports the PRX is allowed to have), no memcmp/strcmp/strstr (not on the PRX import list), no STL, no exceptions.
 #include "blz_link.h"

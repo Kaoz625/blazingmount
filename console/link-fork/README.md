@@ -30,16 +30,23 @@ tools/
   ampr_link_apply.py    overlays module/ onto a clean ampr_emu checkout (exact-string patches)
   build-fork.sh         builds the fork with the PS5 payload SDK
 prebuilt/
-  libSceAmpr.sprx       a build of the fork (no game data) + VERSION.txt
+  (not shipped)         place your OWN built libSceAmpr.sprx here; see prebuilt/README.md.
+                        *.sprx is gitignored so a binary is never committed.
 ```
 
 ## Build
 
-`build-fork.sh` clones `ampr_emu` at the pinned commit, applies `ampr_link_apply.py`, and builds
-with the PS5 payload SDK (this project uses llvm@18 / prospero-clang). Read the script header for
-the exact toolchain and the `AMPR_PROCESS_AIO_INTERCEPT` / `AMPR_PROCESS_SYNC_READ_INTERCEPT`
-build flags (the prebuilt binary is the AIO-intercept variant, which also handles games that do
-their own async reads).
+```sh
+AMPR_EMU_REPO=<drakmor/ampr_emu git url> PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk \
+    sh tools/build-fork.sh
+cp build/libSceAmpr.sprx prebuilt/libSceAmpr.sprx     # so the installers' default --fork finds it
+```
+
+`build-fork.sh` clones `ampr_emu` at the pinned commit `cfa85df` (`$AMPR_EMU_REPO`), applies
+`ampr_link_apply.py`, and builds with the PS5 payload SDK (this project's toolchain is
+llvm / prospero-clang). The build uses the `AMPR_PROCESS_AIO_INTERCEPT` /
+`AMPR_PROCESS_SYNC_READ_INTERCEPT` flags (the AIO-intercept variant, which also handles games
+that do their own async reads). No binary is shipped — you build it.
 
 Per the "pin build deps to a commit and vendor" rule: the exact upstream commit is recorded
 above; keep a mirror of `ampr_emu` at that commit so a yanked upstream release can't break the
@@ -51,7 +58,7 @@ See `module/` and the host builders; a cfg looks like:
 
 ```
 mode remote
-server 192.168.1.130 4451
+server 192.168.1.50 4451
 base /t/<TID>@<image-bytes>
 file <size> <path relative to /app0>
 block_kb 256  cache_mb 32  conns 4  async 1  timeout_ms 8000

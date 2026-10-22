@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // blz_http.h - a tiny HTTP/1.1 Range client over plain TCP for the PS5 SMB link (tools/imgserve on mac1 answers it). Platform-free: every socket call comes in as a
 // function pointer (PRX: libkernel exports resolved by name at run time, so no new import is needed; host test: libc). Plain C-style C++, no allocation, no STL.
 //
@@ -38,7 +39,7 @@ struct HttpConn {
   uint8_t rbuf[2048];           // header read-ahead
 };
 
-// "192.168.1.130" -> ip[4]; false on anything else (IPv4 literals only: no resolver in the game process)
+// "192.168.1.50" -> ip[4]; false on anything else (IPv4 literals only: no resolver in the game process)
 bool parse_ipv4(const char* s, uint8_t out[4]);
 void http_init(HttpConn* c, const NetOps& ops, const uint8_t ip[4], uint16_t port, int timeout_ms);
 bool http_connect(HttpConn* c);

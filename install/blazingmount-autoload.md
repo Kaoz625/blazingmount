@@ -23,9 +23,9 @@ If you build `console/blazingmountd`, add it to the boot list so it discovers an
 games from the host catalog on every boot, with no per-game step.
 
 1. Put the fork where the daemon copies it from:
-   `/data/blazing/fork/libSceAmpr.sprx` (from `console/link-fork/prebuilt/` or your build).
+   `/data/blazing/fork/libSceAmpr.sprx` (build it: `console/link-fork/tools/build-fork.sh`).
 2. Write the host line:
-   `echo "192.168.1.130 4460" > /data/blazing/mount.conf`
+   `echo "192.168.1.50 4460" > /data/blazing/mount.conf`
 3. Copy `blazingmountd.elf` into your payload manager's payload directory.
 4. Add **one** line to the jailbreak autoload list that loads it **after** the core servers and
    ShadowMount. The exact file depends on your stack — common ones are

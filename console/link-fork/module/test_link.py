@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """test_link.py - build and run the host tests of the PS5 SMB-link engine (blz_http.cpp + blz_link_core.cpp) against a mock HTTP Range server with fault routes.
 
     python3 -I tools/smblink/module/test_link.py [--keep] [--no-sanitize] [--real-imgserve HOST:PORT IMAGE.ffpfsc INNERPATH]

@@ -56,7 +56,7 @@ your server just answers file reads, exactly like any network drive.
 | `host/blazingmount-starter.py` | build a **native streaming starter** from one of your games (proven) |
 | `host/blazingmount-host.py` | build a `catalog.json` + per-game starter bundles for the on-console daemon |
 | `host/engine/` | the streaming engine's host helpers (`mkgame`, `amprindex`, `mkstub`, `pconsole`) |
-| `console/link-fork/` | the demand-paging **streaming engine**: `libSceAmpr.sprx` source + build recipe + a prebuilt binary |
+| `console/link-fork/` | the demand-paging **streaming engine**: `libSceAmpr.sprx` source + build recipe (you build the binary; none is shipped) |
 | `console/blazingmountd/` | the self-contained **discovery/register daemon** (the autoloadable payload) — reference source + `build.sh` |
 | `install/blazingmount-install.py` | **one command** to mount a host game onto a console (the working path today) |
 | `install/blazingmount-autoload.md` | how reboot-survival is wired |
@@ -77,7 +77,7 @@ See `docs/HOW-IT-WORKS.md` for the full picture. In short:
 2. **Install one game onto the console** (reboot-surviving, host-assisted):
    ```sh
    python3 install/blazingmount-install.py \
-       --console 192.168.1.39 --host-ip 192.168.1.130 \
+       --console 192.168.1.60 --host-ip 192.168.1.50 \
        --game "The Mound - Omen of Cthulhu (PPSA26223).ffpfsc"
    ```
    The game appears as a tile within ~15 s and plays, streamed from your server.
@@ -110,8 +110,9 @@ downgrade/re-sign a game; it plays your games natively). See `docs/SUPPORTED-FOR
 
 ## License & credits
 
-GPL-3.0-or-later (the link fork derives from GPL-3 `drakmor/ampr_emu`). See `LICENSE`
-and `CREDITS.md`. **Run the license review in `CREDITS.md` before any public release.**
+GPL-3.0-or-later (the link fork derives from GPL-3 `drakmor/ampr_emu`). See `LICENSE`, the
+verbatim `COPYING`, and `CREDITS.md` (the pre-release license checklist is cleared; no prebuilt
+binary and no game content are shipped).
 
 ## Reporting a bug or a fix
 

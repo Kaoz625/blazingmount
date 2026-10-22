@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """mkgame.py - ONE command that turns a game on mac1's drives into a PHAT5 STARTER that streams its big files from mac1.
 Runs ON mac1 (drives, imgserve :4451, dirserve :4452 and the backport tools are there). Nothing here touches a console.
 
@@ -12,7 +13,7 @@ Runs ON mac1 (drives, imgserve :4451, dirserve :4452 and the backport tools are 
         OUT/PLAN.txt                 GB per part + the exact push commands (each needs Markus's yes for new space + the PHAT5 claim)
 
 SRC = an image name in the 5 TB PS5-DOWNLOADS ("The Mound - Omen of Cthulhu (PPSA26223).ffpfsc", served by imgserve) or a game FOLDER
-under the 8 TB homebrew (served by dirserve), e.g. "/Volumes/My Book/homebrew/set-63e2b8a99d138de7-app".
+under the 8 TB homebrew (served by dirserve), e.g. "/path/to/your/folders/<game-folder>".
 
 Why each check (21 Oct 2026): the link lives in our libSceAmpr fork, so a game that does not load libSceAmpr cannot stream; a game that
 does its own AIO needs the AIO-intercept build (ours is); a dump without ampr_emu.index gets one with the REAL sizes (amprindex.py),
@@ -35,14 +36,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import amprindex  # noqa: E402
 
-IMGSERVE = "http://127.0.0.1:4451"
-DRIVE5_DL = "/Volumes/Untitled/PS5-DOWNLOADS"
-DIRSERVE_ROOT = "/Volumes/My Book/homebrew"
-MAC1_LAN = "192.168.1.130"
-BACKPORT_TOOLS = os.path.expanduser("~/Desktop/ps5-linux/tools/backport")
-P5_EXPORTS = os.path.expanduser("~/archive-ssd-20261012/.blazing/wolverine-20260930/p5-exports.json")
-SCENE_FAKELIB = os.path.expanduser("~/.blazing/backport-libs")       # libSceAgc / libSceAgcDriver / libScePsml from the scene backports
-PHAT5_FW = 10.20
+# Host-specific settings - override with environment variables for your own host (see host/README.md).
+IMGSERVE = os.environ.get("BLAZINGMOUNT_IMGSERVE", "http://127.0.0.1:4451")        # your local imgserve
+DRIVE5_DL = os.environ.get("BLAZINGMOUNT_IMAGE_DIR", "/path/to/your/image-drive")  # where your .ffpfsc images live
+DIRSERVE_ROOT = os.environ.get("BLAZINGMOUNT_FOLDER_DIR", "/path/to/your/folders") # where your game folders live
+MAC1_LAN = os.environ.get("BLAZINGMOUNT_HOST_IP", "192.168.1.2")                   # host IP written into a cfg; the installer overrides via --host-ip
+# The settings below are ONLY used by the FW-downgrade/backport path, which is OUT OF SCOPE for the
+# native builder (it refuses a game that needs newer FW than the console). Set them only if you add that path.
+BACKPORT_TOOLS = os.environ.get("BLAZINGMOUNT_BACKPORT_TOOLS", "")
+P5_EXPORTS = os.environ.get("BLAZINGMOUNT_P5_EXPORTS", "")
+SCENE_FAKELIB = os.environ.get("BLAZINGMOUNT_SCENE_FAKELIB", "")                   # libSceAgc / AgcDriver / Psml (downgrade path only)
+PHAT5_FW = float(os.environ.get("BLAZINGMOUNT_MIN_CONSOLE_FW", "10.20"))           # lowest-FW console you target
 MAX_REMOTE = 1024                 # = the link's kMaxFiles (21 Oct: 1024)
 
 

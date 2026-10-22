@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """pconsole.py - small, explicit PS5 helper for the SMB-link tests (stdlib only). READ functions are free; WRITE functions (put/delete/launch) need the console claim.
 
     pconsole.py HOST ps                       process list from shsrv :2323

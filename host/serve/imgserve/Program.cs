@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // imgserve - read-only HTTP Range server for files inside .ffpfsc images (tokon-mod-3, 20 Oct 2026). See imgserve.csproj.
 //
 //   dotnet imgserve.dll <root> [<root> ...] [--port 4451] [--bind 0.0.0.0] [--depth 4] [--cache FILE] [--locked]

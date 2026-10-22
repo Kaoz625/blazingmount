@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // mmap_probe.cpp - the FEASIBILITY HINGE for demand-paging the .rpkg (see DEMAND-PAGING.md).
 //
 // Question it answers: inside a PS5 title (007's process, with kstuff loaded), can WE install an

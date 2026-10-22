@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """blazingmount-host.py - build the catalog + starter bundles the on-console daemon (blazingmountd) pulls.
 
 For each game you choose on your host, this builds a native streaming starter (via
@@ -8,7 +9,7 @@ no per-game step, no computer driving the console.
 
 Run ON the host (the machine with your drives + imgserve/dirserve).
 
-    python3 host/blazingmount-host.py build OUT --host-ip 192.168.1.130 --console-fw 13.60 \
+    python3 host/blazingmount-host.py build OUT --host-ip 192.168.1.50 --console-fw 13.60 \
         --game "The Mound - Omen of Cthulhu (PPSA26223).ffpfsc" \
         --game "Street Fighter 6 (PPSA02632).ffpfsc"
 

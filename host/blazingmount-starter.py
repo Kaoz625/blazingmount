@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """blazingmount-starter.py - build a NATIVE streaming starter (no backport) for a jailbroken PS5
 whose firmware is >= the game's required firmware. The console keeps only the game's SMALL files
 plus 0-byte placeholders for the big ones; our libSceAmpr link fork streams the big files on demand

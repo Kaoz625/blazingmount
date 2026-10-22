@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
 # build.sh - build blazingmountd.elf with the PS5 payload SDK.
 #
 # REFERENCE build. blazingmountd is a plain POSIX C payload; it links against the PS5

@@ -26,8 +26,8 @@ host (your drives)                                 console (blazingmountd, resid
 ## Configure the console (once)
 
 ```
-/data/blazing/mount.conf          one line:  192.168.1.130 4460
-/data/blazing/fork/libSceAmpr.sprx   the link fork (from console/link-fork/prebuilt or your build)
+/data/blazing/mount.conf          one line:  192.168.1.50 4460
+/data/blazing/fork/libSceAmpr.sprx   the link fork (build it: console/link-fork/tools/build-fork.sh)
 ```
 
 ## Build

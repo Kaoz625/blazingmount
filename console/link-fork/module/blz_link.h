@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // blz_link.h - the engine of the PS5 "SMB link" (tools/smblink): a game file that is NOT on the console (a 0-byte placeholder in the stub folder) is read from a server on
 // mac1 (tools/imgserve, HTTP Range) instead. Platform-free core: every platform call comes in through Ops, so the host test can drive it against a mock server and a
 // fake "real file". The PRX glue (blz_link_game.cpp) wires the ops to the AMPR emulator's own helpers and hooks.

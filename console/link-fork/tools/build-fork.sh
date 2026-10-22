@@ -1,27 +1,36 @@
 #!/bin/sh
-# build-fork.sh - build OUR fork of the AMPR emulator (drakmor/ampr_emu cfa85df + tools/smblink/module) on mac2. OFF-CONSOLE: nothing here touches a console.
-#   sh tools/smblink/tools/build-fork.sh [extra make args]
-# Output: assets-local/smblink/fork/<stamp>/libSceAmpr.sprx (+ .prx, SHA256SUMS.txt, build.log, VARIANT.txt = the extra make args, passed to build AND verify). Hashes differ per build (__DATE__/__TIME__ in the source): compare sizes.
-# The build uses AMPR_PROCESS_SYNC_READ_INTERCEPT=1 so the emulator also hooks pread/read (the default build only hooks open/stat/close/fstat/lseek).
+# SPDX-License-Identifier: GPL-3.0-or-later
+# build-fork.sh - build the libSceAmpr.sprx link fork from source.
+#
+# Clones drakmor/ampr_emu at the pinned commit, overlays console/link-fork/module/ onto it with
+# ampr_link_apply.py, and builds the result with the PS5 payload SDK. The fork is a GPL-3 derivative
+# of ampr_emu (see ../README.md and ../../../CREDITS.md).
+#
+#   AMPR_EMU_REPO=<drakmor/ampr_emu git url> PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk sh build-fork.sh
+#
+# Output: ../build/libSceAmpr.sprx
+#   To use the installers' default --fork, copy it to ../prebuilt/libSceAmpr.sprx
+#   (the binary is .gitignored on purpose - BlazingMount ships source + this recipe, never a prebuilt).
 set -e
-REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
-STAMP="$(date +%Y%m%d-%H%M%S)"
-REMOTE="NYCT/tokon-ampr-build"
-ssh mac2 "mkdir -p $REMOTE/smblink-$STAMP/module $REMOTE/smblink-$STAMP/tools"
-scp -q "$REPO"/tools/smblink/module/blz_http.* "$REPO"/tools/smblink/module/blz_link.h "$REPO"/tools/smblink/module/blz_link_core.cpp "$REPO"/tools/smblink/module/blz_link_game.cpp "$REPO"/tools/smblink/module/blz_link_hooks.h mac2:$REMOTE/smblink-$STAMP/module/
-scp -q "$REPO"/tools/smblink/tools/ampr_link_apply.py mac2:$REMOTE/smblink-$STAMP/tools/
-OUT="$REPO/assets-local/smblink/fork/$STAMP"
-mkdir -p "$OUT"
-echo "extra make args: ${*:-none} (AMPR_PROCESS_AIO_INTERCEPT=1 = the game's own AIO calls are hooked too, e.g. Samson)" > "$OUT/VARIANT.txt"
-ssh mac2 "set -e
-export PATH=/usr/local/opt/llvm@18/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin LLVM_CONFIG=/usr/local/opt/llvm@18/bin/llvm-config
-cd \$HOME/$REMOTE
-rm -rf smblink-fork-$STAMP && git clone -q ampr_emu smblink-fork-$STAMP && git -C smblink-fork-$STAMP checkout -q cfa85df379f6eeeb165d7badf9b648e266fe77b7
-python3 -I smblink-$STAMP/tools/ampr_link_apply.py smblink-fork-$STAMP smblink-$STAMP/module
-cd smblink-fork-$STAMP
-nice -n 10 make -j6 PS5_PAYLOAD_SDK=\$HOME/NYCT/ps5-linux/sdk/ps5-payload-sdk PYTHON=python3 AMPR_PROCESS_SYNC_READ_INTERCEPT=1 $* 2>&1 | tail -40
-ls -la out/payload-sdk/libSceAmpr.sprx out/payload-sdk/libSceAmpr.prx
-nice -n 10 make verify PS5_PAYLOAD_SDK=\$HOME/NYCT/ps5-linux/sdk/ps5-payload-sdk PYTHON=python3 AMPR_PROCESS_SYNC_READ_INTERCEPT=1 $* 2>&1 | tail -8
-shasum -a 256 out/payload-sdk/libSceAmpr.sprx out/payload-sdk/libSceAmpr.prx > SHA256SUMS.txt; cat SHA256SUMS.txt" 2>&1 | tee "$OUT/build.log"
-scp -q mac2:$REMOTE/smblink-fork-$STAMP/out/payload-sdk/libSceAmpr.sprx mac2:$REMOTE/smblink-fork-$STAMP/out/payload-sdk/libSceAmpr.prx mac2:$REMOTE/smblink-fork-$STAMP/SHA256SUMS.txt "$OUT/"
-echo "copied to $OUT"; ls -la "$OUT"
+: "${PS5_PAYLOAD_SDK:?set PS5_PAYLOAD_SDK to your ps5-payload-sdk checkout}"
+: "${AMPR_EMU_REPO:?set AMPR_EMU_REPO to drakmor/ampr_emu's git URL (the GPL-3 upstream this fork derives from)}"
+
+PIN=cfa85df379f6eeeb165d7badf9b648e266fe77b7     # drakmor/ampr_emu master, 2026-09-06 (4 commits after tag 0.4.2.1)
+HERE="$(cd "$(dirname "$0")" && pwd)"
+FORK="$(cd "$HERE/.." && pwd)"                    # console/link-fork
+WORK="${WORK:-${TMPDIR:-/tmp}/blazingmount-fork}"
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+git clone -q "$AMPR_EMU_REPO" "$WORK/ampr_emu"
+git -C "$WORK/ampr_emu" checkout -q "$PIN"
+python3 -I "$HERE/ampr_link_apply.py" "$WORK/ampr_emu" "$FORK/module"
+
+# AMPR_PROCESS_SYNC_READ_INTERCEPT=1 hooks pread/read; AMPR_PROCESS_AIO_INTERCEPT=1 also hooks the
+# game's own async reads (needed by games that do their own AIO). This is the proven variant.
+make -C "$WORK/ampr_emu" -j4 PS5_PAYLOAD_SDK="$PS5_PAYLOAD_SDK" PYTHON=python3 \
+    AMPR_PROCESS_SYNC_READ_INTERCEPT=1 AMPR_PROCESS_AIO_INTERCEPT=1 "$@"
+
+mkdir -p "$FORK/build"
+cp "$WORK/ampr_emu/out/payload-sdk/libSceAmpr.sprx" "$FORK/build/"
+echo "built: $FORK/build/libSceAmpr.sprx"
+echo "to use the installers' default, run: cp \"$FORK/build/libSceAmpr.sprx\" \"$FORK/prebuilt/libSceAmpr.sprx\""

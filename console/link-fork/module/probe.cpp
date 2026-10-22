@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // probe.cpp - host utility: fetch ranges from tools/imgserve (or any Range server) with the SAME client code the PS5 module uses, and report throughput.
 //   probe <ip> <port> <url path> <offset> <len> [repeat] [outfile]
 #include "blz_http.h"

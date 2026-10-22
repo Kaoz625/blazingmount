@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """amprindex.py - read / write ampr_emu's /app0/ampr_emu.index (format AMPRIDX3, drakmor/ampr_emu src/ampr_emu_index.cpp).
 
 Why: a game that reads through APR needs this index to map paths to file ids and SIZES. Without the file, ampr_emu builds it at runtime

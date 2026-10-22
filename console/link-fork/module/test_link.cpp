@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // test_link.cpp - host test of the SMB-link engine (blz_http + blz_link_core) against the mock Range server that test_link.py starts.
 //   test_link <ip> <port> <datadir>      datadir holds data.bin (the file the server serves as /v/T.ffpfsc/data.bin) and the files for the fault routes
 // Output: one line per check ("ok ..." / "FAIL ..."), exit code 0 only if every check passed.

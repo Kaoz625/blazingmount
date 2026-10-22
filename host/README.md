@@ -39,7 +39,7 @@ pushes the result to the console.
 
 ```sh
 python3 blazingmount-host.py build /srv/blazingmount \
-    --host-ip 192.168.1.130 --console-fw 13.60 \
+    --host-ip 192.168.1.50 --console-fw 13.60 \
     --game "The Mound - Omen of Cthulhu (PPSA26223).ffpfsc" \
     --game "Street Fighter 6 (PPSA02632).ffpfsc"
 python3 blazingmount-host.py serve /srv/blazingmount --port 4460

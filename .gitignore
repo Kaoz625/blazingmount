@@ -34,5 +34,3 @@ catalog.json
 eboot.bin
 decrypted/
 
-# the only intentional binary is console/link-fork/prebuilt/libSceAmpr.sprx (GPL-3 fork, no game data)
-!console/link-fork/prebuilt/libSceAmpr.sprx

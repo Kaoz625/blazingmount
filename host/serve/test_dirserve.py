@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Host tests for dirserve.py: python3 -I tools/imgserve/test_dirserve.py  (stdlib only, loopback, temp folders, no console)."""
 import hashlib
 import http.client
@@ -132,7 +133,7 @@ def main():
 
     # ---- /t/<TITLEID>: game folders found by title id under several roots; a rename/move is found again (smb-link-5, 21 Oct 2026)
     root2 = os.path.join(tmp, "drive2")
-    g1 = os.path.join(root2, "set-63e2b8a99d138de7-app")            # a dump folder with an opaque name, one level down
+    g1 = os.path.join(root2, "example-dump-app")            # a dump folder with an opaque name, one level down
     os.makedirs(os.path.join(g1, "sce_sys"))
     os.makedirs(os.path.join(g1, "packs"))
     open(os.path.join(g1, "eboot.bin"), "wb").write(b"EB")
