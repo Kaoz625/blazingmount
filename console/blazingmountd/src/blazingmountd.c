@@ -58,6 +58,10 @@
 #define BM_DEFAULT_HOST "192.168.1.130"
 #endif
 #define BM_DEFAULT_PORT  4451
+#ifndef BM_SMP_VERSION
+#define BM_SMP_VERSION "1.7beta6-fix2"   // PHAT5 launches work with it; DIGI5 1.7beta7 (pulled after the 23 Oct wipe) killed every launch
+#endif
+#define SMP_LOG        "/data/shadowmount/debug.log"
 
 #define HOMEBREW_DIR   "/data/homebrew"
 #define LINK_DIR       "/data/blazing/link"
@@ -214,6 +218,7 @@ typedef struct {
     int fw_override;                 // console FW in hundredths (1360 = 13.60), 0 = ask the kernel
     long long max_starter_mb, min_free_mb, big_starter_mb, big_free_mb;
     int poll_secs;
+    char smp_version[64];
     int n_only, n_skip, n_first;
     char only[MAX_LIST][40], skip[MAX_LIST][40], first[MAX_LIST][40];
 } conf_t;
@@ -230,6 +235,7 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   host 192.168.1.130 | port 4451 | fw 13.60 | only <TID or TID@bytes> | skip <TID or TID@bytes>
 //   first <TID or TID@bytes>   built before every other game, in the order listed (e.g. the games this console had before a wipe)
 //   max_starter_mb 2048 | min_free_mb 51200 | poll_secs 600
+//   smp_version 1.7beta6-fix2   the ShadowMount+ build our starters are proven with (checked every pass, see check_smp)
 //   big_starter_mb 12000 | big_free_mb 204800   a starter may be up to big_starter_mb when /data has >= big_free_mb free
 //                                              (GoT 9.8 GB, CoD 3.6 GB: Markus wants them back, 23 Oct)
 // The v1 one-line form "<ip> <port>" pointed at the old catalog server: its ip is kept, its port ignored (imgserve is :4451).
@@ -238,6 +244,7 @@ static void read_conf(conf_t *c) {
     strcpy(c->host, BM_DEFAULT_HOST); c->port = BM_DEFAULT_PORT;
     c->max_starter_mb = 2048; c->min_free_mb = 50 * 1024; c->poll_secs = 600;
     c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
+    strcpy(c->smp_version, BM_SMP_VERSION);
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
     char txt[8192]; ssize_t n = read(fd, txt, sizeof txt - 1); close(fd);
@@ -262,6 +269,7 @@ static void read_conf(conf_t *c) {
         else if (!strcmp(k, "min_free_mb")) c->min_free_mb = atoll(v);
         else if (!strcmp(k, "big_starter_mb")) c->big_starter_mb = atoll(v);
         else if (!strcmp(k, "big_free_mb")) c->big_free_mb = atoll(v);
+        else if (!strcmp(k, "smp_version")) snprintf(c->smp_version, sizeof c->smp_version, "%s", v);
         else if (!strcmp(k, "poll_secs") && atoi(v) >= 30) c->poll_secs = atoi(v);
         else logf_("mount.conf: unknown setting '%s' ignored", k);
     }
@@ -652,9 +660,35 @@ out:
     return rc;
 }
 
+// ---------------------------------------------------------------- ShadowMount+ version guard (23 Oct 2026)
+// DIGI5's payload-manager repo slot pulled ShadowMount+ 1.7beta7 after a wipe and every starter then died the second it launched
+// (sandbox released, no game process). The proven build is 1.7beta6-fix2. Its first log line says
+// "ShadowMount+ v<version> ...": compare it every pass and say so loudly (log + klog) whenever it is not the expected one.
+static void check_smp(const conf_t *c) {
+    static char last[64] = "";
+    char p[600], b[512] = ""; int fd = open(P(p, sizeof p, SMP_LOG), O_RDONLY);
+    char ver[64] = "unknown (no ShadowMount+ log)";
+    if (fd >= 0) {
+        ssize_t n = read(fd, b, sizeof b - 1); close(fd);
+        if (n > 0) {
+            b[n] = 0;
+            char *v = strstr(b, "ShadowMount+ v");
+            if (v) { v += 14; size_t k = 0; while (v[k] && v[k] != ' ' && v[k] != '\n' && k < sizeof ver - 1) { ver[k] = v[k]; k++; } ver[k] = 0; }
+            else snprintf(ver, sizeof ver, "unknown (no version line)");
+        }
+    }
+    int ok = !strcmp(ver, c->smp_version);
+    if (strcmp(ver, last) || !ok) {
+        if (ok) logf_("ShadowMount+ v%s = the proven build", ver);
+        else logf_("WARNING: ShadowMount+ v%s is running, expected v%s - starters may die at launch (restore the proven build in the payload-manager slot)", ver, c->smp_version);
+        snprintf(last, sizeof last, "%s", ver);
+    }
+}
+
 // ---------------------------------------------------------------- one pass over the host's games
 static int sync_once(void) {
     conf_t c; read_conf(&c);
+    check_smp(&c);
     int cfw = console_fw(&c);
     char *txt = NULL; int st = 0;
     long long n = http_get(c.host, c.port, "/games.txt", -1, &txt, 300, &st);
