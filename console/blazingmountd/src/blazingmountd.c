@@ -212,7 +212,7 @@ static long long http_get(const char *host, int port, const char *path, int outf
 typedef struct {
     char host[64]; int port;
     int fw_override;                 // console FW in hundredths (1360 = 13.60), 0 = ask the kernel
-    long long max_starter_mb, min_free_mb;
+    long long max_starter_mb, min_free_mb, big_starter_mb, big_free_mb;
     int poll_secs;
     int n_only, n_skip, n_first;
     char only[MAX_LIST][40], skip[MAX_LIST][40], first[MAX_LIST][40];
@@ -230,11 +230,14 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   host 192.168.1.130 | port 4451 | fw 13.60 | only <TID or TID@bytes> | skip <TID or TID@bytes>
 //   first <TID or TID@bytes>   built before every other game, in the order listed (e.g. the games this console had before a wipe)
 //   max_starter_mb 2048 | min_free_mb 51200 | poll_secs 600
+//   big_starter_mb 12000 | big_free_mb 204800   a starter may be up to big_starter_mb when /data has >= big_free_mb free
+//                                              (GoT 9.8 GB, CoD 3.6 GB: Markus wants them back, 23 Oct)
 // The v1 one-line form "<ip> <port>" pointed at the old catalog server: its ip is kept, its port ignored (imgserve is :4451).
 static void read_conf(conf_t *c) {
     memset(c, 0, sizeof *c);
     strcpy(c->host, BM_DEFAULT_HOST); c->port = BM_DEFAULT_PORT;
     c->max_starter_mb = 2048; c->min_free_mb = 50 * 1024; c->poll_secs = 600;
+    c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
     char txt[8192]; ssize_t n = read(fd, txt, sizeof txt - 1); close(fd);
@@ -257,6 +260,8 @@ static void read_conf(conf_t *c) {
         else if (!strcmp(k, "first") && c->n_first < MAX_LIST) strncpy(c->first[c->n_first++], v, 39);
         else if (!strcmp(k, "max_starter_mb")) c->max_starter_mb = atoll(v);
         else if (!strcmp(k, "min_free_mb")) c->min_free_mb = atoll(v);
+        else if (!strcmp(k, "big_starter_mb")) c->big_starter_mb = atoll(v);
+        else if (!strcmp(k, "big_free_mb")) c->big_free_mb = atoll(v);
         else if (!strcmp(k, "poll_secs") && atoi(v) >= 30) c->poll_secs = atoi(v);
         else logf_("mount.conf: unknown setting '%s' ignored", k);
     }
@@ -560,18 +565,20 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
     char stage[900], sp[600];
     snprintf(stage, sizeof stage, "%s/%s", P(sp, sizeof sp, STAGE_DIR), name);
     if (!has_eboot) { snprintf(reason, rn, "no eboot.bin in the image"); rc = 1; goto out; }
-    if (c->max_starter_mb > 0 && starter_bytes > c->max_starter_mb * 1000000LL) {
-        snprintf(reason, rn, "starter would be %.1f GB (limit %lld MB): too much of the game is in files the link does not stream",
-                 starter_bytes / 1e9, c->max_starter_mb);
+    char dp[600]; long long fm = free_mb(P(dp, sizeof dp, "/data"));
+    long long scap = c->max_starter_mb;                               // a bigger starter is fine on a console with lots of room
+    if (scap > 0 && c->big_starter_mb > scap && fm >= c->big_free_mb) scap = c->big_starter_mb;
+    if (scap > 0 && starter_bytes > scap * 1000000LL) {
+        snprintf(reason, rn, "starter would be %.1f GB (limit %lld MB with %lld MB free on /data; %lld MB when >= %lld MB free)",
+                 starter_bytes / 1e9, scap, fm, c->big_starter_mb, c->big_free_mb);
         rc = 1; goto out;
     }
-    char dp[600]; long long fm = free_mb(P(dp, sizeof dp, "/data"));
     if (fm >= 0 && fm - starter_bytes / (1024 * 1024) < c->min_free_mb) {
         snprintf(reason, rn, "not enough space: %lld MB free, starter %lld MB, floor %lld MB", fm, starter_bytes / (1024 * 1024), c->min_free_mb);
         rc = -1; goto out;
     }
-    logf_("build %s [%s] v%s FW %s: %d files, %d streamed (%.1f GB), starter %.2f GB, %s", name, g->key, g->version, g->fw, n, nr,
-          remote_bytes / 1e9, starter_bytes / 1e9, has_index ? "own ampr_emu.index" : "ampr_emu.index made here");
+    logf_("build %s [%s] v%s FW %s: %d files, %d streamed (%.1f GB), starter %.2f GB (cap %lld MB, /data free %lld MB), %s", name, g->key, g->version, g->fw, n, nr,
+          remote_bytes / 1e9, starter_bytes / 1e9, scap, fm, has_index ? "own ampr_emu.index" : "ampr_emu.index made here");
 
     // 3) stage: eboot first (fail fast when the game cannot stream), then everything else
     rm_rf(stage);
@@ -684,7 +691,8 @@ static int sync_once(void) {
         if (dupe) continue;                                         // one starter per title id per pass
         if (tid_present(g.tid)) { present++; strcpy(done_tids[ndone++], g.tid); continue; }
         st_t *s = state_get(g.key);
-        if (s && (!strcmp(s->status, "refused") || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES) || !strcmp(s->status, "done"))) { known++; continue; }
+        int size_refusal = s && !strcmp(s->status, "refused") && !strncmp(s->reason, "starter would be", 16);   // re-checked: free space changes
+        if (s && ((!strcmp(s->status, "refused") && !size_refusal) || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES) || !strcmp(s->status, "done"))) { known++; continue; }
         if (!g.version[0]) { state_set(g.key, "refused", "sce_sys/param.json unreadable (image damaged?)"); refused++; logf_("refused %s: param.json unreadable", g.key); continue; }
         int gfw = fw_hundredths(g.fw);
         if (cfw && gfw > cfw) {
@@ -699,8 +707,9 @@ static int sync_once(void) {
         else { state_set(g.key, "failed", reason); failed++; logf_("  FAILED %s %s (try %d of %d): %s", g.key, g.title, state_get(g.key)->tries, MAX_TRIES, reason); }
     }
     free(txt);
-    logf_("pass: %d images listed by %s:%d, %d already on the console, %d built, %d refused, %d failed, %d settled earlier (state file)",
-          listed_n, c.host, c.port, present, built, refused, failed, known);
+    char dp[600];
+    logf_("pass: %d images listed by %s:%d, %d already on the console, %d built, %d refused, %d failed, %d settled earlier (state file); /data free %lld MB",
+          listed_n, c.host, c.port, present, built, refused, failed, known, free_mb(P(dp, sizeof dp, "/data")));
     return 0;
 }
 
