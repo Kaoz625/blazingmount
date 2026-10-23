@@ -107,8 +107,21 @@ def write_catalog(out, host_ip, games):
     with open(tmp, "w") as fh:
         fh.write("# TID\tNAME\tBUNDLE\tCFG  (BlazingMount catalog for blazingmountd)\n")
         for g in games:
+            if has_long_paths(out, g) and not os.environ.get("BLAZINGMOUNTD_LONGPATHS"):
+                continue                      # held back: a console daemon older than the long-path fix would unpack it wrong
             fh.write("%s\t%s\t%s\t%s\n" % (g["tid"], g["name"], g["bundle"], g["cfg"]))
     os.replace(tmp, t)
+
+
+def has_long_paths(out, g):
+    """True when the game's bundle holds a name over 100 chars. blazingmountd before the long-path fix reads only the first 100
+    chars of a tar name, so such a bundle would be installed with cut, colliding paths. Set BLAZINGMOUNTD_LONGPATHS=1 once every
+    console runs the fixed daemon (the .elf built from this repo) to list those games in catalog.txt too (catalog.json always has them)."""
+    try:
+        with tarfile.open(os.path.join(out, g["bundle"])) as t:
+            return any(len(m.name) > 100 for m in t)
+    except (OSError, tarfile.TarError, KeyError):
+        return False
 
 
 def merge_games(existing, built):

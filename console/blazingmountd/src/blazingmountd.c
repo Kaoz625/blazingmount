@@ -83,23 +83,53 @@ static void makedirs(const char *path) {
 }
 
 static void write_file(const char *path, const char *data, long n) {
-    char dir[1024]; strncpy(dir, path, sizeof dir - 1); dir[sizeof dir - 1] = 0;
+    char dir[1700]; strncpy(dir, path, sizeof dir - 1); dir[sizeof dir - 1] = 0;
     char *slash = strrchr(dir, '/'); if (slash) { *slash = 0; makedirs(dir); }
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd >= 0) { write(fd, data, n); close(fd); }
 }
 
-// ---- minimal ustar extraction into dest_root ----
+// ---- minimal tar extraction into dest_root ----
+// Names longer than 100 chars arrive three ways: the ustar "prefix" field (offset 345), a pax 'x' header ("path=..."), or a GNU 'L'
+// entry. All three are honoured (the old reader took only the first 100 chars, so long paths were cut and collided).
 static int untar(const char *dest_root, const char *tar, long tlen) {
     long off = 0;
+    char longname[1024]; longname[0] = 0;                       // pending name from a pax 'x' / GNU 'L' entry
     while (off + 512 <= tlen) {
         const char *h = tar + off; off += 512;
         if (h[0] == 0) break;                                   // end of archive
-        char name[101]; memcpy(name, h, 100); name[100] = 0;
         char szoct[13]; memcpy(szoct, h + 124, 12); szoct[12] = 0;
         long fsz = strtol(szoct, NULL, 8);
         char type = h[156];
-        char full[1200]; snprintf(full, sizeof full, "%s/%s", dest_root, name);
+        if (type == 'x' || type == 'L') {                       // long-name carrier: body follows
+            if (off + fsz > tlen) return -1;
+            const char *b = tar + off;
+            if (type == 'L') {
+                long n = fsz < 1023 ? fsz : 1023; memcpy(longname, b, n); longname[n] = 0;
+            } else {                                            // pax: "<len> path=<name>\n" records
+                long p = 0;
+                while (p < fsz) {
+                    long rl = strtol(b + p, NULL, 10); if (rl <= 0 || p + rl > fsz) break;
+                    const char *eq = memchr(b + p, '=', rl);
+                    if (eq && eq - (b + p) >= 5 && memcmp(eq - 4, "path", 4) == 0 && eq[-5] == ' ') {
+                        long n = (b + p + rl - 1) - (eq + 1); if (n > 1023) n = 1023;
+                        memcpy(longname, eq + 1, n); longname[n] = 0;
+                    }
+                    p += rl;
+                }
+            }
+            off += (fsz + 511) & ~511L;
+            continue;
+        }
+        char name[1024];
+        if (longname[0]) { strncpy(name, longname, sizeof name - 1); name[sizeof name - 1] = 0; longname[0] = 0; }
+        else {
+            char nm[101], pre[156]; memcpy(nm, h, 100); nm[100] = 0;
+            memcpy(pre, h + 345, 155); pre[155] = 0;
+            if (memcmp(h + 257, "ustar", 5) == 0 && pre[0]) snprintf(name, sizeof name, "%s/%s", pre, nm);
+            else snprintf(name, sizeof name, "%s", nm);
+        }
+        char full[1700]; snprintf(full, sizeof full, "%s/%s", dest_root, name);
         if (type == '5') {                                      // directory
             makedirs(full);
         } else if (type == '0' || type == 0) {                  // regular file
