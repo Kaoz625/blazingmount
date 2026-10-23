@@ -47,6 +47,11 @@ BACKPORT_TOOLS = os.environ.get("BLAZINGMOUNT_BACKPORT_TOOLS", "")
 P5_EXPORTS = os.environ.get("BLAZINGMOUNT_P5_EXPORTS", "")
 SCENE_FAKELIB = os.environ.get("BLAZINGMOUNT_SCENE_FAKELIB", "")                   # libSceAgc / AgcDriver / Psml (downgrade path only)
 PHAT5_FW = float(os.environ.get("BLAZINGMOUNT_MIN_CONSOLE_FW", "10.20"))           # lowest-FW console you target
+# Never streamed, always real bytes in the starter: files the game reads OUTSIDE the link's hooks.
+#  .pgm  = PlayGo manifest (a game can read it with its own libc fopen/fread, which the link never sees:
+#          the 0-byte placeholder then reads as size 0 and the game crashes on a NULL buffer)
+#  .prx/.sprx/.elf/.self = modules the loader reads straight from /app0
+KEEP_LOCAL_EXT = (".pgm", ".prx", ".sprx", ".elf", ".self")
 MAX_REMOTE = 1024                 # = the link's kMaxFiles (21 Oct: 1024)
 
 
@@ -181,7 +186,8 @@ def check(spec, min_mb, quiet=False):
         needed, nids = elf_needs(eb) if ok else ([], set())
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    big = sorted([f for f in files if f[1] >= min_mb << 20 and f[0] != "eboot.bin" and not f[0].startswith(("sce_sys/", "sce_module/", "prx/", "fakelib"))],
+    big = sorted([f for f in files if f[1] >= min_mb << 20 and f[0] != "eboot.bin" and not f[0].startswith(("sce_sys/", "sce_module/", "prx/", "fakelib"))
+                  and not f[0].endswith(KEEP_LOCAL_EXT)],
                  key=lambda f: -f[1])
     r = {"src": spec, "kind": src.kind, **info, "files": len(files), "bytes": sum(f[1] for f in files),
          "loads_libSceAmpr": "libSceAmpr.prx" in needed, "loads_playgo": "libScePlayGo.prx" in needed, "apr_reads": sorted(APR_READ[n] for n in nids if n in APR_READ),
