@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
@@ -178,9 +179,11 @@ static void install_game(const char *host, int port, char *line) {
     char fk[1200]; snprintf(fk, sizeof fk, "%s/%s/fakelib/libSceAmpr.sprx", stage, name);
     copy_file(FORK_SRC, fk);
 
-    // atomic-ish move into the scanned homebrew dir
+    // atomic-ish move into the scanned homebrew dir. A freshly wiped console has no /data/homebrew: the rename then failed silently,
+    // "done" was logged anyway and every pass downloaded the same games again (DIGI5, 23 Oct 2026).
     char inner[1200]; snprintf(inner, sizeof inner, "%s/%s", stage, name);
-    rename(inner, dest);
+    makedirs(HOMEBREW_DIR);
+    if (rename(inner, dest) != 0) { snprintf(msg, sizeof msg, "  move into %s failed (errno %d)", dest, errno); logln(msg); return; }
 
     // link config
     snprintf(path, sizeof path, "/%s", cfg);
