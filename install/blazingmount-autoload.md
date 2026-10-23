@@ -19,19 +19,30 @@ launchd / systemd service), the same as any always-on network drive.
 
 ## Optional: autoload `blazingmountd` (full auto-discovery)
 
-If you build `console/blazingmountd`, add it to the boot list so it discovers and installs new
-games from the host catalog on every boot, with no per-game step.
+If you build `console/blazingmountd`, add it to the boot list so it finds and BUILDS every game the
+host's imgserve lists, on every boot, with no per-game step. Since v2 (23 Oct 2026) the payload
+builds each starter itself on the console (mkgame.py's rules: small files + eboot + modules real,
+big files 0-byte placeholders, ampr_emu.index, link cfg) and the libSceAmpr link fork is EMBEDDED
+in it - there is no loose fork file and no prebuilt catalog/bundles on the host.
 
-1. Put the fork where the daemon copies it from:
-   `/data/blazing/fork/libSceAmpr.sprx` (build it: `console/link-fork/tools/build-fork.sh`).
-2. Write the host line:
-   `echo "192.168.1.50 4460" > /data/blazing/mount.conf`
-3. Copy `blazingmountd.elf` into your payload manager's payload directory.
+1. Build it with your fork: `FORK=.../libSceAmpr.sprx PS5_PAYLOAD_SDK=... sh console/blazingmountd/build.sh`
+   (`BM_DEFAULT_HOST=<your host ip>` bakes in your imgserve; port 4451).
+2. Optional `/data/blazing/mount.conf` - overrides only, one per line: `host <ip>`, `port <n>`,
+   `fw 13.60`, `only <TID|TID@bytes>`, `skip <TID|TID@bytes>`, `first <TID|TID@bytes>` (built
+   before the rest, in order), `max_starter_mb 2048`, `min_free_mb 51200`, `poll_secs 600`.
+   A v1 one-line `<ip> <port>` file still works (its ip is used; imgserve is :4451).
+3. Copy `blazingmountd.elf` into your payload manager's payload directory (a local slot, below).
 4. Add **one** line to the jailbreak autoload list that loads it **after** the core servers and
    ShadowMount. The exact file depends on your stack — common ones are
    `/data/pldmgr/autoload.txt`, `/data/ps5_autoloader/autoload.txt`,
    `/mnt/usb*/ps5_autoloader/`, and `/data/etaHEN/config.ini`. **Change only one list and say
    which**, then re-read it and count the entries.
+
+What it writes: `/data/homebrew/<Name (TID)>/` (one folder per game), `/data/blazing/link/<TID>.cfg`,
+`/data/blazing/blazingmountd.{log,state,lock}`, and a temporary `/data/blz-stage/bm/`. The state file
+remembers every game it built, refused (FW too new, eboot without libSceAmpr, starter too big) or
+failed (3 tries), so nothing is downloaded again; delete a line there to retry that game. A game whose
+title id is already on the console (any folder or image) is never added twice.
 
 ### Boot-list safety (read this)
 
