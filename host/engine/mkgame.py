@@ -51,7 +51,7 @@ PHAT5_FW = float(os.environ.get("BLAZINGMOUNT_MIN_CONSOLE_FW", "10.20"))        
 #  .pgm  = PlayGo manifest (a game can read it with its own libc fopen/fread, which the link never sees:
 #          the 0-byte placeholder then reads as size 0 and the game crashes on a NULL buffer)
 #  .prx/.sprx/.elf/.self = modules the loader reads straight from /app0
-KEEP_LOCAL_EXT = (".pgm", ".prx", ".sprx", ".elf", ".self")
+KEEP_LOCAL_EXT = (".pgm", ".prx", ".sprx", ".elf", ".self", ".index", ".crc")   # .index/.crc: AMPR asset index read by the emulator itself (Hellraiser, 23 Oct)
 MAX_REMOTE = 1024                 # = the link's kMaxFiles (21 Oct: 1024)
 
 
