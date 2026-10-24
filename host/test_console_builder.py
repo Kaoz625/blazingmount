@@ -99,7 +99,13 @@ def main():
             byte_diff = sorted(p for p in set(want) & set(got) if want[p] != got[p])
             cw = cfg_lines(os.path.join(ref, g["tid"] + ".cfg"), host_port)
             cg = cfg_lines(os.path.join(console, "data", "blazing", "link", g["tid"] + ".cfg"), host_port)
-            ok = not (only_ref or only_bm or size_diff or byte_diff) and cw == cg
+            # every file the console executes must carry an execute bit (24 Oct 2026: 0644 eboot.bin = EACCES = CE-107750-0,
+            # 0644 .sprx/.prx = rtld "attribute error" = CE-108255-1 on DIGI5)
+            no_x = sorted(p for p in got if (os.path.basename(p) == "eboot.bin" or p.lower().endswith((".sprx", ".prx", ".elf", ".self")))
+                          and not os.stat(os.path.join(got_dir, p)).st_mode & 0o111)
+            if no_x:
+                print("FAIL %s: executable files without an execute bit: %s" % (key, no_x[:5]))
+            ok = not (only_ref or only_bm or size_diff or byte_diff or no_x) and cw == cg
             n_ph = sum(1 for p in got if got[p][0] == 0)
             print("%s %s %r: %d files (%d placeholders, %.1f MB), mkgame %d files; only-mkgame %s only-payload %s size-diff %s byte-diff %s cfg %s"
                   % ("PASS" if ok else "FAIL", key, name, len(got), n_ph, sum(v[0] for v in got.values()) / 1e6, len(want),

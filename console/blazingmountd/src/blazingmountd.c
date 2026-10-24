@@ -132,9 +132,28 @@ static int write_all(int fd, const void *b, size_t n) {
     return 0;
 }
 
+// Starter files the console EXECUTES need an execute bit, root included (FreeBSD exec/rtld check):
+// a 0644 eboot.bin fails exec with EACCES (klog "error=0x80aa001a errno=13" = CE-107750-0) and a 0644
+// .sprx/.prx makes rtld refuse it ("mount flag / attribute error ... va_mode 0x1a4" = CE-108255-1).
+// Proven on DIGI5 24 Oct 2026 (NBA 2K27 ran after chmod 755). FTP-copied starters were 0777, so it never showed.
+static mode_t file_mode(const char *path) {
+    const char *b = strrchr(path, '/'); b = b ? b + 1 : path;
+    const char *e = strrchr(b, '.');
+    if (!strcmp(b, "eboot.bin")) return 0755;
+    if (e && (!strcasecmp(e, ".sprx") || !strcasecmp(e, ".prx") || !strcasecmp(e, ".elf") || !strcasecmp(e, ".self")))
+        return 0755;
+    return 0644;
+}
+
+static int open_out(const char *path) {         // create/truncate with the right mode, also when the file existed
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, file_mode(path));
+    if (fd >= 0) fchmod(fd, file_mode(path));
+    return fd;
+}
+
 static int write_file(const char *path, const void *data, size_t n) {
     parent_dirs(path);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open_out(path);
     if (fd < 0) return -1;
     int r = write_all(fd, data, n);
     close(fd);
@@ -521,7 +540,7 @@ static int fetch_to(const conf_t *c, const char *key, const char *rel, const cha
     char url[2200]; snprintf(url, sizeof url, "/t/%s/%s", key, rel);
     for (int t = 1; t <= 3; t++) {
         parent_dirs(dst);
-        int fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = open_out(dst);
         if (fd < 0) { logf_("  cannot create %s (errno %d)", dst, errno); return -1; }
         int st = 0;
         long long n = http_get(c->host, c->port, url, fd, NULL, 60, &st);
