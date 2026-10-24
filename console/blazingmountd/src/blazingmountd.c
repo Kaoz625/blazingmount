@@ -310,7 +310,7 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //                        same drive (the final move is a rename), free space is checked there too.
 //   auto_update 1        keep starters current (v2.5, Markus 24 Oct): see update_starter(). A starter folder with a file named
 //                        .blazingmount-pin is never touched (an A/B test, a hand-made build).
-//   tsnet 1 | proxy 127.0.0.1 8888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
+//   tsnet 1 | proxy 127.0.0.1 18888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
 //                        (/data/tailscale/config.json with "httpProxyAddr", or an explicit proxy line) the payload's own downloads AND every
 //                        game's link cfg fall back to that proxy when the LAN server does not answer (tsnet 0 = never)
 //   conns 8 | readahead_kb 2048 | cache_mb_ram 32        link speed settings written into every game's cfg (= mkgame 24 Oct)
