@@ -34,3 +34,6 @@ catalog.json
 eboot.bin
 decrypted/
 
+
+# BlazingMount app: pictures and PS5 zips are build output
+app/out/

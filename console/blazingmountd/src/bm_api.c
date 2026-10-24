@@ -465,7 +465,7 @@ static void api_status(sb_t *o) {
     int fd = open(P(sp, sizeof sp, SMP_LOG), O_RDONLY);
     if (fd >= 0) { ssize_t n = read(fd, b, sizeof b - 1); close(fd); if (n > 0) { b[n] = 0; char *v = strstr(b, "ShadowMount+ v"); if (v) sscanf(v + 14, "%63s", ver); } }
     pthread_mutex_lock(&g_api_mu);
-    sb_f(o, "{\"version\":\"%s\",\"gen\":%lu,\"api_port\":%d,\"busy\":{\"tid\":", BM_VERSION, g_gen, BM_API_PORT);
+    sb_f(o, "{\"version\":\"%s\",\"now\":%lld,\"gen\":%lu,\"api_port\":%d,\"busy\":{\"tid\":", BM_VERSION, (long long)time(NULL), g_gen, BM_API_PORT);
     sb_js(o, g_busy_tid); sb_puts(o, ",\"title\":"); sb_js(o, g_busy_title);
     sb_f(o, ",\"since\":%lld},\"last_pass\":%lld,\"queued\":%d,\"recent\":[", (long long)g_busy_since, (long long)g_last_pass, g_nq);
     for (int i = 0; i < g_nrecent; i++) { if (i) sb_puts(o, ","); sb_js(o, g_recent[i]); }
@@ -628,9 +628,11 @@ static void bm_api_pass_begin(conf_t *c) {
     int conf_changed = 0;
     for (int i = 0; i < n; i++) {
         bm_act_t *a = &q[i]; char why[300] = "";
-        if (!strcmp(a->what, "install") || !strcmp(a->what, "unhide")) {
+        if (!strcmp(a->what, "install")) {
             choice_set(ch, a->tid, "want"); state_forget_tid(a->tid);
-            api_recent("%s %s: marked wanted, building this pass", a->what, a->tid);
+            api_recent("install %s: marked wanted, building this pass", a->tid);
+        } else if (!strcmp(a->what, "unhide")) {
+            choice_set(ch, a->tid, ""); api_recent("show %s again: back to the normal rule (%s)", a->tid, ch->autob ? "built with every game" : "built when picked");
         } else if (!strcmp(a->what, "hide")) {
             choice_set(ch, a->tid, "skip"); api_recent("hide %s: will not be built (its copy, if any, stays)", a->tid);
         } else if (!strcmp(a->what, "remove")) {

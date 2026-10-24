@@ -10,7 +10,7 @@ host/api_hooks.py are applied to a temp copy), runs it resident against a fake c
   2. a POST without "X-BM-Request: 1" is refused; unknown actions, settings and newline values are refused
   3. install -> the starter is built by the main loop (eboot 0755), state 'installed'; remove -> folder + cfg gone, 'skip'
   4. remove is refused while the game runs, and never deletes a full copy
-  5. hide / unhide / set / auto land in choices.tsv and mount.conf
+  5. hide / unhide (forget) / set / auto land in choices.tsv and mount.conf
   6. a game added on the drives shows up by itself (the API's watch) and, with auto on, gets built without any request
 """
 import hashlib, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
@@ -160,7 +160,7 @@ def main():
         check(wait(lambda: "conns 6" in open(os.path.join(b, "mount.conf")).read()), "set conns -> mount.conf")
         check("host 127.0.0.1" in open(os.path.join(b, "mount.conf")).read(), "other mount.conf lines kept")
         act("do=unhide&tid=PPSA90003")
-        check(wait(lambda: row("PPSA90003")["choice"] == "want"), "unhide -> want")
+        check(wait(lambda: row("PPSA90003")["choice"] == ""), "unhide -> back to the normal rule (no choice)")
         # 6) a game added on the drives: seen by the watch, built by itself with auto on
         act("do=auto&value=1")
         check(wait(lambda: "auto\t1" in open(os.path.join(b, "choices.tsv")).read()), "auto 1 saved")
