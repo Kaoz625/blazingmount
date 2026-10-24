@@ -26,6 +26,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/file.h>
 #include <sys/mount.h>
@@ -58,6 +59,10 @@
 #define BM_DEFAULT_HOST "192.168.1.130"
 #endif
 #define BM_DEFAULT_PORT  4451
+#ifndef BM_DEFAULT_TS_HOST
+#define BM_DEFAULT_TS_HOST "100.104.191.30"   // the host on the tailnet (away from home, through the tsnet payload's HTTP proxy)
+#endif
+#define TSNET_CONF     "/data/tailscale/config.json"
 #ifndef BM_SMP_VERSION
 #define BM_SMP_VERSION "1.7beta6-fix2"   // PHAT5 launches work with it; DIGI5 1.7beta7 (pulled after the 23 Oct wipe) killed every launch
 #endif
@@ -172,20 +177,60 @@ static void url_path(char *out, size_t n, const char *raw) {        // percent-e
     out[o] = 0;
 }
 
+// ---- away from home (24 Oct 2026): PS5 tailscale is a tsnet payload, not a system VPN, so a socket cannot reach the home server from
+// another network. tsnet runs a local HTTP proxy (config.json "httpProxyAddr"); when the LAN server does not connect within LAN_CONNECT_MS
+// every request goes through it in absolute form (GET http://<server_ts>/path). The choice sticks until the other route is needed.
+#define LAN_CONNECT_MS 1500
+static char g_px_host[64]; static int g_px_port;      // tsnet proxy (0 = none)
+static char g_ts_host[64]; static int g_ts_port;      // the server on the tailnet
+static int g_route;                                   // 0 = LAN server, 1 = proxy
+
+static int connect_ms(const char *ip, int port, int ms) {   // connected blocking socket, or -1 (non-blocking connect + poll = a real timeout)
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) { close(s); return -1; }
+    int fl = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, fl | O_NONBLOCK);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) {
+        if (errno != EINPROGRESS) { close(s); return -1; }
+        struct pollfd pf = { s, POLLOUT, 0 };
+        if (poll(&pf, 1, ms) != 1) { close(s); return -1; }
+        int err = 0; socklen_t el = sizeof err;
+        if (getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) != 0 || err) { close(s); return -1; }
+    }
+    fcntl(s, F_SETFL, fl);
+    return s;
+}
+
 // GET path. Body goes to outfd (>= 0) or into *mem (malloc'd, NUL-terminated). Returns body bytes, or -1 (connect/IO), -2 (non-2xx).
 static long long http_get(const char *host, int port, const char *path, int outfd, char **mem, int timeout_s, int *status_out) {
     if (status_out) *status_out = 0;
-    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int s = -1, via_proxy = 0;
+    if (g_px_port && g_ts_port) {
+        for (int k = 0; k < 2 && s < 0; k++) {
+            int r = k == 0 ? g_route : 1 - g_route;
+            s = r == 0 ? connect_ms(host, port, LAN_CONNECT_MS) : connect_ms(g_px_host, g_px_port, timeout_s * 1000);
+            if (s >= 0) {
+                via_proxy = r;
+                if (r != g_route) {
+                    g_route = r;
+                    if (r) logf_("route: LAN server %s:%d unreachable -> TAILNET %s:%d via proxy %s:%d", host, port, g_ts_host, g_ts_port, g_px_host, g_px_port);
+                    else logf_("route: LAN server %s:%d answers again", host, port);
+                }
+            }
+        }
+    } else s = connect_ms(host, port, timeout_s * 1000);
     if (s < 0) return -1;
     struct timeval tv = { timeout_s, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-    struct sockaddr_in a; memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET; a.sin_port = htons((unsigned short)port);
-    if (inet_pton(AF_INET, host, &a.sin_addr) != 1 || connect(s, (struct sockaddr *)&a, sizeof a) < 0) { close(s); return -1; }
     char enc[3000], req[3300];
     url_path(enc, sizeof enc, path);
-    int rl = snprintf(req, sizeof req, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", enc, host);
+    int rl = via_proxy
+        ? snprintf(req, sizeof req, "GET http://%s:%d%s HTTP/1.0\r\nHost: %s:%d\r\nConnection: close\r\n\r\n", g_ts_host, g_ts_port, enc, g_ts_host, g_ts_port)
+        : snprintf(req, sizeof req, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", enc, host);
     if (write_all(s, req, (size_t)rl) != 0) { close(s); return -1; }
 
     static char buf[1 << 20];
@@ -239,6 +284,9 @@ typedef struct {
     long long disk_cache_mb; int conns, readahead_kb, cache_mb_ram;
     int poll_secs;
     char smp_version[64];
+    int tsnet;                       // 1 = use the tsnet proxy fallback when one is found (default), 0 = never
+    char proxy[64]; int proxy_port;  // explicit proxy (else /data/tailscale/config.json httpProxyAddr)
+    char server_ts[64]; int server_ts_port;
     int n_only, n_skip, n_first;
     char only[MAX_LIST][40], skip[MAX_LIST][40], first[MAX_LIST][40];
 } conf_t;
@@ -256,6 +304,9 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   first <TID or TID@bytes>   built before every other game, in the order listed (e.g. the games this console had before a wipe)
 //   max_starter_mb 2048 | min_free_mb 51200 | poll_secs 600
 //   smp_version 1.7beta6-fix2   the ShadowMount+ build our starters are proven with (checked every pass, see check_smp)
+//   tsnet 1 | proxy 127.0.0.1 8888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
+//                        (/data/tailscale/config.json with "httpProxyAddr", or an explicit proxy line) the payload's own downloads AND every
+//                        game's link cfg fall back to that proxy when the LAN server does not answer (tsnet 0 = never)
 //   conns 8 | readahead_kb 2048 | cache_mb_ram 32        link speed settings written into every game's cfg (= mkgame 24 Oct)
 //   disk_cache_mb 0      the link's console-disk cache per game, a FIXED cap (the link never grows past it). Default 0 = off (Markus
 //                        24 Oct: no console cache that grows; must work on consoles with no M.2 and little space). When set, it is used
@@ -270,6 +321,7 @@ static void read_conf(conf_t *c) {
     c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
     c->disk_cache_mb = 0; c->conns = 8; c->readahead_kb = 2048; c->cache_mb_ram = 32;
     strcpy(c->smp_version, BM_SMP_VERSION);
+    c->tsnet = 1; strcpy(c->server_ts, BM_DEFAULT_TS_HOST); c->server_ts_port = 0;   // 0 = the imgserve port
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
     char txt[8192]; ssize_t n = read(fd, txt, sizeof txt - 1); close(fd);
@@ -298,6 +350,14 @@ static void read_conf(conf_t *c) {
         else if (!strcmp(k, "conns") && atoi(v) > 0) c->conns = atoi(v);
         else if (!strcmp(k, "readahead_kb")) c->readahead_kb = atoi(v);
         else if (!strcmp(k, "cache_mb_ram") && atoi(v) > 0) c->cache_mb_ram = atoi(v);
+        else if (!strcmp(k, "tsnet")) c->tsnet = atoi(v);
+        else if (!strcmp(k, "proxy") || !strcmp(k, "server_ts")) {
+            char ip[64] = ""; int pt = 0;
+            if (sscanf(line, "%*s %63s %d", ip, &pt) == 2 && pt > 0) {
+                if (!strcmp(k, "proxy")) { snprintf(c->proxy, sizeof c->proxy, "%s", ip); c->proxy_port = pt; }
+                else { snprintf(c->server_ts, sizeof c->server_ts, "%s", ip); c->server_ts_port = pt; }
+            }
+        }
         else if (!strcmp(k, "smp_version")) snprintf(c->smp_version, sizeof c->smp_version, "%s", v);
         else if (!strcmp(k, "poll_secs") && atoi(v) >= 30) c->poll_secs = atoi(v);
         else logf_("mount.conf: unknown setting '%s' ignored", k);
@@ -668,8 +728,11 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
             dc = 0;
         }
         size_t cap2 = 4096 + (size_t)nr * 300; char *cfg = malloc(cap2); size_t o = 0;
-        o += (size_t)snprintf(cfg + o, cap2 - o, "# blazingmountd %s v%s: %s, %d files read from %s (%.1f GB)\nmode remote\nserver %s %d\nbase /t/%s\n",
-                              BM_VERSION, g->version, name, nr, c->host, remote_bytes / 1e9, c->host, c->port, g->key);
+        o += (size_t)snprintf(cfg + o, cap2 - o, "# blazingmountd %s v%s: %s, %d files read from %s (%.1f GB)\nmode remote\nserver %s %d\n",
+                              BM_VERSION, g->version, name, nr, c->host, remote_bytes / 1e9, c->host, c->port);
+        if (g_px_port && g_ts_port)                                   // = mkgame (24 Oct): away-from-home fallback lines right after server
+            o += (size_t)snprintf(cfg + o, cap2 - o, "proxy %s %d\nserver_ts %s %d\n", g_px_host, g_px_port, g_ts_host, g_ts_port);
+        o += (size_t)snprintf(cfg + o, cap2 - o, "base /t/%s\n", g->key);
         for (int i = 0; i < nr; i++) o += (size_t)snprintf(cfg + o, cap2 - o, "file %lld %s\n", big[i]->size, big[i]->path);
         // same keys and order as mkgame.cfg_text (24 Oct): dc_queue only when not the link's default 16 (we never set it)
         o += (size_t)snprintf(cfg + o, cap2 - o, "block_kb 256\ncache_mb %d\nconns %d\nasync 1\ntimeout_ms 8000\nstats_s 2\nlog_first 60\n"
@@ -722,10 +785,42 @@ static void check_smp(const conf_t *c) {
     }
 }
 
+// the tsnet proxy for this pass: mount.conf "proxy", else /data/tailscale/config.json "httpProxyAddr": "ip:port"; none = LAN only
+static void tsnet_setup(const conf_t *c) {
+    static char said[160] = "";
+    g_px_port = 0; g_ts_port = 0;
+    if (!c->tsnet) return;
+    char px[64] = ""; int pp = 0;
+    if (c->proxy_port) { snprintf(px, sizeof px, "%s", c->proxy); pp = c->proxy_port; }
+    else {
+        char p[600], b[8192]; int fd = open(P(p, sizeof p, TSNET_CONF), O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = read(fd, b, sizeof b - 1); close(fd);
+            if (n > 0) {
+                b[n] = 0;
+                char *k = strstr(b, "\"httpProxyAddr\"");
+                if (k && (k = strchr(k + 15, ':')) && (k = strchr(k, '"'))) {
+                    char addr[80] = ""; sscanf(k + 1, "%79[^\"]", addr);
+                    char *colon = strrchr(addr, ':');
+                    if (colon) { *colon = 0; snprintf(px, sizeof px, "%s", addr[0] ? addr : "127.0.0.1"); pp = atoi(colon + 1); }
+                }
+            }
+        }
+    }
+    if (pp <= 0) return;
+    snprintf(g_px_host, sizeof g_px_host, "%s", strcmp(px, "0.0.0.0") && strcmp(px, "localhost") ? px : "127.0.0.1");
+    g_px_port = pp;
+    snprintf(g_ts_host, sizeof g_ts_host, "%s", c->server_ts);
+    g_ts_port = c->server_ts_port ? c->server_ts_port : c->port;
+    char now[160]; snprintf(now, sizeof now, "%s:%d %s:%d", g_px_host, g_px_port, g_ts_host, g_ts_port);
+    if (strcmp(now, said)) { logf_("tsnet: away-from-home fallback ready (proxy %s:%d -> %s:%d)", g_px_host, g_px_port, g_ts_host, g_ts_port); snprintf(said, sizeof said, "%s", now); }
+}
+
 // ---------------------------------------------------------------- one pass over the host's games
 static int sync_once(void) {
     conf_t c; read_conf(&c);
     check_smp(&c);
+    tsnet_setup(&c);
     int cfw = console_fw(&c);
     char *txt = NULL; int st = 0;
     long long n = http_get(c.host, c.port, "/games.txt", -1, &txt, 300, &st);

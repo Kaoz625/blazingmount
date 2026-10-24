@@ -53,6 +53,8 @@ def run_payload(binary, root, imgserve, keys):
     os.makedirs(os.path.join(root, "data", "blazing"), exist_ok=True)
     with open(os.path.join(root, "data", "blazing", "mount.conf"), "w") as fh:
         fh.write("host %s\nport %d\nmax_starter_mb 0\nmin_free_mb 0\n" % (u.hostname, u.port))
+        # mkgame writes the away-from-home lines whenever the fork knows them (24 Oct); the payload writes them when tsnet is present
+        fh.write(os.environ.get("BM_TEST_TSNET_CONF", "proxy 127.0.0.1 8888\nserver_ts 100.104.191.30 4451\n"))
         for k in keys:
             fh.write("only %s\n" % k)
     r = subprocess.run([binary, "once"], env=dict(os.environ, BM_ROOT=root), capture_output=True, text=True, timeout=7200)
