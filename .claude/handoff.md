@@ -49,3 +49,11 @@ Next step (exact):
      play.py up --console DIGI5 --backend chiaki; open the tile with Cross; shots; CIRCLE quits; play.py down; ps5-release DIGI5.
 Key files: docs/UI-DESIGN.md, console/blazingmountd/src/bm_api.c, host/api_hooks.py, host/test_api.py, app/src/bm_app.h, app/ps5/*.
 Blockers: DIGI5 claim (digi5-test-agent); hooks wait for 11:00 hub ack window.
+
+### blazingmount-ui-agent update ~10:45 (24 Oct) - SCOPE: everything Markus owns, every system, with covers
+- app 0.3.0 (31b5252): whole library grid/list, system chips L2/R2, show modes OPTIONS, TOUCH PAD grid/list, covers via sheets + focus full cover. Dell zip 0f8515ad.
+- host/library/library.py (+ test_library.py ALL PASS): mac1 ~/.blazing/library/library.json = 18,809 games / 56 systems.
+  COVER RUN in a visible mac1 Terminal: ~/.blazing/library/covers-run.command (resumable; log run.log). When it says DONE:
+  `open -a Terminal ~/.blazing/library/watch.command` (follows drives + owned list every 5 min).
+- imgserve library routes: blazing-fighters 8ffc032, built mac1 ~/.blazing/imgserve/bin.next, NOT deployed (needs a quiet :4451 restart; asked on hub).
+- bm_api passes catalog/covers through (12a4091). Hooks still NOT in blazingmountd.c (11:00 plan). PS5 payload with hooks built mac2 ~/NYCT/bm-ui-build (not installed).
