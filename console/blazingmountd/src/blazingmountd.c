@@ -284,7 +284,8 @@ typedef struct {
     long long disk_cache_mb; int conns, readahead_kb, cache_mb_ram;
     int poll_secs;
     char smp_version[64];
-    char homebrew_dir[256];          // where starters go (default /data/homebrew; PHAT5: /mnt/ext1/homebrew = its M.2)
+    char homebrew_dir[256];
+    int auto_update;                 // 1 = keep existing starters current (fork + link settings, image changes); 0 = never touch them          // where starters go (default /data/homebrew; PHAT5: /mnt/ext1/homebrew = its M.2)
     int tsnet;                       // 1 = use the tsnet proxy fallback when one is found (default), 0 = never
     char proxy[64]; int proxy_port;  // explicit proxy (else /data/tailscale/config.json httpProxyAddr)
     char server_ts[64]; int server_ts_port;
@@ -307,6 +308,8 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   smp_version 1.7beta6-fix2   the ShadowMount+ build our starters are proven with (checked every pass, see check_smp)
 //   homebrew_dir /mnt/ext1/homebrew   where new starters go (default /data/homebrew). The staging folder is <parent>/blz-stage/bm on the
 //                        same drive (the final move is a rename), free space is checked there too.
+//   auto_update 1        keep starters current (v2.5, Markus 24 Oct): see update_starter(). A starter folder with a file named
+//                        .blazingmount-pin is never touched (an A/B test, a hand-made build).
 //   tsnet 1 | proxy 127.0.0.1 8888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
 //                        (/data/tailscale/config.json with "httpProxyAddr", or an explicit proxy line) the payload's own downloads AND every
 //                        game's link cfg fall back to that proxy when the LAN server does not answer (tsnet 0 = never)
@@ -325,6 +328,7 @@ static void read_conf(conf_t *c) {
     c->disk_cache_mb = 0; c->conns = 8; c->readahead_kb = 2048; c->cache_mb_ram = 32;
     strcpy(c->smp_version, BM_SMP_VERSION);
     strcpy(c->homebrew_dir, HOMEBREW_DIR);
+    c->auto_update = 1;
     c->tsnet = 1; strcpy(c->server_ts, BM_DEFAULT_TS_HOST); c->server_ts_port = 0;   // 0 = the imgserve port
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
@@ -355,6 +359,7 @@ static void read_conf(conf_t *c) {
         else if (!strcmp(k, "readahead_kb")) c->readahead_kb = atoi(v);
         else if (!strcmp(k, "cache_mb_ram") && atoi(v) > 0) c->cache_mb_ram = atoi(v);
         else if (!strcmp(k, "tsnet")) c->tsnet = atoi(v);
+        else if (!strcmp(k, "auto_update")) c->auto_update = atoi(v);
         else if (!strcmp(k, "homebrew_dir") && v[0] == '/') snprintf(c->homebrew_dir, sizeof c->homebrew_dir, "%s", v);
         else if (!strcmp(k, "proxy") || !strcmp(k, "server_ts")) {
             char ip[64] = ""; int pt = 0;
@@ -451,12 +456,18 @@ static void state_set(const char *key, const char *status, const char *reason) {
 // ---------------------------------------------------------------- title ids already on this console
 #define MAX_PRESENT 1024
 static char g_present[MAX_PRESENT][10]; static int g_npresent;
+static char g_present_dir[MAX_PRESENT][640];                           // the folder that carries the title id ("" = an image file / unknown)
+static char g_scan_dir[640];                                           // set by scan_present while it looks at one folder
 
 static void tids_in(const char *s) {                                  // every PPSA12345 / CUSA12345 in a string
     for (const char *q = s; q[0]; q++) {
         if ((!strncmp(q, "PPSA", 4) || !strncmp(q, "CUSA", 4))) {
             int ok = 1; for (int i = 4; i < 9; i++) if (q[i] < '0' || q[i] > '9') { ok = 0; break; }
-            if (ok && g_npresent < MAX_PRESENT) { memcpy(g_present[g_npresent], q, 9); g_present[g_npresent][9] = 0; g_npresent++; q += 8; }
+            if (ok && g_npresent < MAX_PRESENT) {
+                memcpy(g_present[g_npresent], q, 9); g_present[g_npresent][9] = 0;
+                snprintf(g_present_dir[g_npresent], sizeof g_present_dir[0], "%s", g_scan_dir);
+                g_npresent++; q += 8;
+            }
         }
     }
 }
@@ -473,6 +484,9 @@ static void scan_present(void) {
         struct dirent *e;
         while ((e = readdir(d))) {
             if (e->d_name[0] == '.') continue;
+            char full[1400]; snprintf(full, sizeof full, "%s/%s", rp, e->d_name);
+            struct stat sb;
+            snprintf(g_scan_dir, sizeof g_scan_dir, "%s", (stat(full, &sb) == 0 && S_ISDIR(sb.st_mode)) ? full : "");
             tids_in(e->d_name);
             char pj[1400]; snprintf(pj, sizeof pj, "%s/%s/sce_sys/param.json", rp, e->d_name);
             int fd = open(pj, O_RDONLY);
@@ -484,12 +498,18 @@ static void scan_present(void) {
             if (t) { char one[64]; snprintf(one, sizeof one, "%.40s", t); tids_in(one); }
         }
         closedir(d);
+        g_scan_dir[0] = 0;
     }
 }
 
 static int tid_present(const char *tid) {
     for (int i = 0; i < g_npresent; i++) if (!strcmp(g_present[i], tid)) return 1;
     return 0;
+}
+
+static const char *tid_dir(const char *tid) {                         // the first FOLDER that carries tid, or NULL
+    for (int i = 0; i < g_npresent; i++) if (!strcmp(g_present[i], tid) && g_present_dir[i][0]) return g_present_dir[i];
+    return NULL;
 }
 
 // ---------------------------------------------------------------- ampr_emu.index (AMPRIDX3), exactly host/engine/amprindex.build()
@@ -620,7 +640,8 @@ static int fetch_to(const conf_t *c, const char *key, const char *rel, const cha
 typedef struct { char key[48], tid[16], version[32], fw[16], title[256]; long long size; } game_t;
 
 // Builds one starter. Returns 0 done, 1 refused (reason), -1 failed (reason).
-static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, size_t rn) {
+static int game_running(const char *tid);
+static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, size_t rn, int replace) {
     char name[400], title[300];
     snprintf(title, sizeof title, "%s", g->title[0] ? g->title : g->tid);
     {   // mkgame: name.replace("/", " ").replace(":", "").strip()
@@ -632,7 +653,7 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
         snprintf(name, sizeof name, "%s (%s)", s, g->tid);
     }
     char dest[900], hb[600]; snprintf(dest, sizeof dest, "%s/%s", P(hb, sizeof hb, c->homebrew_dir), name);
-    if (exists(dest)) { snprintf(reason, rn, "folder already there"); return 0; }
+    if (exists(dest) && !replace) { snprintf(reason, rn, "folder already there"); return 0; }
 
     // 1) the file list
     char url[200], *lst = NULL; int st = 0;
@@ -758,9 +779,17 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
         free(cfg);
         if (w != 0 || rename(tmp, cfgp) != 0) { snprintf(reason, rn, "cannot write %s (errno %d)", cfgp, errno); goto out; }
     }
-    // 7) into the scanned homebrew dir
+    // 7) into the scanned homebrew dir. replace (the image changed): the old starter stays until the new one is complete, and the swap
+    //    happens only while the game is not running; the old one is removed after the new one is in place.
     makedirs(hb);
-    if (rename(stage, dest) != 0) { snprintf(reason, rn, "move into %s failed (errno %d)", dest, errno); goto out; }
+    if (replace && exists(dest)) {
+        if (game_running(g->tid)) { snprintf(reason, rn, "game is running: the new starter is not swapped in now (next pass)"); goto out; }
+        char old[1000]; snprintf(old, sizeof old, "%s.blz-old", stage);
+        rm_rf(old);
+        if (rename(dest, old) != 0) { snprintf(reason, rn, "cannot move the old starter aside (errno %d)", errno); goto out; }
+        if (rename(stage, dest) != 0) { rename(old, dest); snprintf(reason, rn, "swap failed (errno %d): old starter put back", errno); goto out; }
+        rm_rf(old);
+    } else if (rename(stage, dest) != 0) { snprintf(reason, rn, "move into %s failed (errno %d)", dest, errno); goto out; }
     snprintf(reason, rn, "%s: %d files local (%.2f GB), %d streamed (%.1f GB), fork %.12s", name, nfiles + 1, starter_bytes / 1e9, nr,
              remote_bytes / 1e9, BM_FORK_SHA);
     rc = 0;
@@ -827,6 +856,108 @@ static void tsnet_setup(const conf_t *c) {
     if (strcmp(now, said)) { logf_("tsnet: away-from-home fallback ready (proxy %s:%d -> %s:%d)", g_px_host, g_px_port, g_ts_host, g_ts_port); snprintf(said, sizeof said, "%s", now); }
 }
 
+// ---------------------------------------------------------------- auto-update (v2.5, Markus 24 Oct: "it should have been installed on both")
+// A game counts as running while ShellCore has its sandbox (/mnt/sandbox/<TID>_000; a leftover sandbox only delays an update).
+static int game_running(const char *tid) {
+    char p[600], s2[64]; snprintf(s2, sizeof s2, "/mnt/sandbox/%s_000", tid);
+    return exists(P(p, sizeof p, s2));
+}
+
+static char *slurp(const char *path, size_t *len) {
+    int fd = open(path, O_RDONLY); if (fd < 0) return NULL;
+    struct stat sb; if (fstat(fd, &sb) != 0) { close(fd); return NULL; }
+    char *b = malloc((size_t)sb.st_size + 1); if (!b) { close(fd); return NULL; }
+    size_t got = 0; ssize_t n;
+    while (got < (size_t)sb.st_size && (n = read(fd, b + got, (size_t)sb.st_size - got)) > 0) got += (size_t)n;
+    close(fd); b[got] = 0; *len = got;
+    return b;
+}
+
+static int mem_has(const char *b, size_t n, const char *needle) {
+    size_t k = strlen(needle);
+    for (size_t i = 0; i + k <= n; i++) if (b[i] == needle[0] && !memcmp(b + i, needle, k)) return 1;
+    return 0;
+}
+
+// The link settings this payload manages in ANY streaming starter's cfg: conns, readahead_kb, proxy, server_ts (the file list, base,
+// cache and trace lines stay as they are: a hand-made or backported starter keeps its own). Returns a malloc'd new cfg text, or NULL
+// when nothing would change.
+static char *patched_cfg(const conf_t *c, const char *old, size_t olen) {
+    size_t cap = olen + 512; char *o = malloc(cap); size_t n = 0;
+    const char *p = old, *end = old + olen;
+    while (p < end) {
+        const char *e = memchr(p, '\n', (size_t)(end - p)); if (!e) e = end;
+        size_t L = (size_t)(e - p);
+        int drop = (L >= 6 && !strncmp(p, "conns ", 6)) || (L >= 13 && !strncmp(p, "readahead_kb ", 13)) ||
+                   (L >= 6 && !strncmp(p, "proxy ", 6)) || (L >= 10 && !strncmp(p, "server_ts ", 10));
+        if (!drop) {
+            memcpy(o + n, p, L); n += L; o[n++] = '\n';
+            if (L >= 7 && !strncmp(p, "server ", 7) && g_px_port && g_ts_port)
+                n += (size_t)snprintf(o + n, cap - n, "proxy %s %d\nserver_ts %s %d\n", g_px_host, g_px_port, g_ts_host, g_ts_port);
+        }
+        p = e < end ? e + 1 : end;
+    }
+    n += (size_t)snprintf(o + n, cap - n, "conns %d\n", c->conns);
+    if (c->readahead_kb > 0) n += (size_t)snprintf(o + n, cap - n, "readahead_kb %d\n", c->readahead_kb);
+    o[n] = 0;
+    // same settings (in any order) = no change: compare as sorted sets of the managed lines
+    size_t on = 0, nn = 0; char ob[2048] = "", nb[2048] = "";
+    for (int pass = 0; pass < 2; pass++) {
+        const char *q = pass ? o : old, *qe = pass ? o + n : end; char *dst = pass ? nb : ob; size_t *dn = pass ? &nn : &on;
+        while (q < qe) {
+            const char *e = memchr(q, '\n', (size_t)(qe - q)); if (!e) e = qe;
+            size_t L = (size_t)(e - q);
+            if (((L >= 6 && (!strncmp(q, "conns ", 6) || !strncmp(q, "proxy ", 6))) || (L >= 13 && !strncmp(q, "readahead_kb ", 13)) ||
+                 (L >= 10 && !strncmp(q, "server_ts ", 10))) && *dn + L + 2 < 2048) { memcpy(dst + *dn, q, L); *dn += L; dst[(*dn)++] = '|'; dst[*dn] = 0; }
+            q = e < qe ? e + 1 : qe;
+        }
+    }
+    if (!strcmp(ob, nb)) { free(o); return NULL; }
+    return o;
+}
+
+// Keep ONE present streaming starter current. Never for a running game, a pinned folder, a starter that is not a streaming one (no
+// "mode remote" cfg) or one whose libSceAmpr is not our link (a full copy, a stock emulator): those are left exactly as they are.
+//   fork:  fakelib/libSceAmpr.sprx differs from the fork inside this payload -> replaced (new file next to it, then one rename)
+//   cfg:   the managed settings differ (patched_cfg) -> rewritten (tmp + rename), only once the starter has our current fork
+// Returns 1 when something was updated.
+static int update_starter(const conf_t *c, const char *tid, const char *dir) {
+    if (!c->auto_update || !dir) return 0;
+    char p1[900], p2[900], cfgp[700], lp[600];
+    snprintf(p1, sizeof p1, "%s/.blazingmount-pin", dir); if (exists(p1)) return 0;
+    snprintf(cfgp, sizeof cfgp, "%s/%s.cfg", P(lp, sizeof lp, LINK_DIR), tid);
+    size_t clen = 0; char *cfg = slurp(cfgp, &clen);
+    if (!cfg) return 0;
+    if (!mem_has(cfg, clen, "\nmode remote")) { free(cfg); return 0; }
+    {   // must BE a starter: the cfg's first streamed file is a 0-byte placeholder in this folder (a full copy has the real bytes)
+        const char *fl = strstr(cfg, "\nfile ");
+        long long want = 0; char rel[700] = "";
+        if (!fl || sscanf(fl + 6, "%lld %699[^\n]", &want, rel) != 2 || want <= 0) { free(cfg); return 0; }
+        char fp[1500]; struct stat sb; snprintf(fp, sizeof fp, "%s/%s", dir, rel);
+        if (stat(fp, &sb) != 0 || sb.st_size != 0) { free(cfg); return 0; }
+    }
+    snprintf(p1, sizeof p1, "%s/fakelib/libSceAmpr.sprx", dir);
+    size_t flen = 0; char *fk = slurp(p1, &flen);
+    if (!fk || !mem_has(fk, flen, "blz_link")) { free(fk); free(cfg); return 0; }     // not our link: leave it
+    int fork_same = flen == bm_fork_len && !memcmp(fk, bm_fork, flen);
+    free(fk);
+    char *ncfg = patched_cfg(c, cfg, clen);
+    if (fork_same && !ncfg) { free(cfg); return 0; }
+    if (game_running(tid)) { logf_("  update %s waits: the game is running", tid); free(ncfg); free(cfg); return 0; }
+    if (!fork_same) {
+        snprintf(p2, sizeof p2, "%s/fakelib/libSceAmpr.blz-new.sprx", dir);   // ends in .sprx: written 0755 like every module (CE-108255-1 otherwise)
+        if (write_file(p2, bm_fork, bm_fork_len) != 0 || rename(p2, p1) != 0) { logf_("  update %s: cannot replace the fork (errno %d)", tid, errno); unlink(p2); free(ncfg); free(cfg); return 0; }
+        logf_("  updated %s: fork -> %.12s (%s)", tid, BM_FORK_SHA, dir);
+    }
+    if (ncfg) {
+        char tmp[720]; snprintf(tmp, sizeof tmp, "%s.tmp", cfgp);
+        if (write_file(tmp, ncfg, strlen(ncfg)) != 0 || rename(tmp, cfgp) != 0) logf_("  update %s: cannot rewrite the cfg (errno %d)", tid, errno);
+        else logf_("  updated %s: link settings (conns %d, readahead_kb %d%s)", tid, c->conns, c->readahead_kb, g_px_port ? ", tsnet proxy" : "");
+    }
+    free(ncfg); free(cfg);
+    return 1;
+}
+
 // ---------------------------------------------------------------- one pass over the host's games
 static int sync_once(void) {
     conf_t c; read_conf(&c);
@@ -838,7 +969,7 @@ static int sync_once(void) {
     if (n < 0) { logf_("games list http://%s:%d/games.txt failed (http %d)", c.host, c.port, st); return -1; }
     state_load();
     scan_present();
-    int listed_n = 0, present = 0, built = 0, refused = 0, failed = 0, known = 0;
+    int listed_n = 0, present = 0, built = 0, refused = 0, failed = 0, known = 0, updated = 0;
     static game_t rows[2048]; int nrows = 0;
     char *save = NULL;
     for (char *l = strtok_r(txt, "\n", &save); l && nrows < 2048; l = strtok_r(NULL, "\n", &save)) {
@@ -866,7 +997,26 @@ static int sync_once(void) {
         if (listed(c.skip, c.n_skip, g.key, g.tid)) continue;
         int dupe = 0; for (int i = 0; i < ndone; i++) if (!strcmp(done_tids[i], g.tid)) dupe = 1;
         if (dupe) continue;                                         // one starter per title id per pass
-        if (tid_present(g.tid)) { present++; strcpy(done_tids[ndone++], g.tid); continue; }
+        if (tid_present(g.tid)) {
+            present++; strcpy(done_tids[ndone++], g.tid);
+            // built by this payload from another image of the same title id = the image on the drive changed: rebuild + safe swap
+            int ours_other = 0;
+            for (int i = 0; i < g_nst; i++) {
+                if (strcmp(g_st[i].status, "done") || strncmp(g_st[i].key, g.tid, 9) || g_st[i].key[9] != '@' || !strcmp(g_st[i].key, g.key)) continue;
+                int still = 0;                                        // a second image of the title still on the drives is NOT a change
+                for (int r = 0; r < nrows; r++) if (!strcmp(rows[r].key, g_st[i].key)) still = 1;
+                if (!still) ours_other = i + 1;
+            }
+            if (c.auto_update && ours_other && !(state_get(g.key) && !strcmp(state_get(g.key)->status, "failed") && state_get(g.key)->tries >= MAX_TRIES)) {
+                logf_("image changed for %s: %s -> %s, rebuilding the starter", g.tid, g_st[ours_other - 1].key, g.key);
+                char reason[600] = "";
+                int rc = build_game(&c, &g, cfw, reason, sizeof reason, 1);
+                if (rc == 0) { state_set(g.key, "done", reason); state_set(g_st[ours_other - 1].key, "replaced", g.key); built++; logf_("  done %s -> %s", g.key, reason); }
+                else if (rc == 1) { state_set(g.key, "refused", reason); refused++; logf_("  refused %s: %s", g.key, reason); }
+                else { state_set(g.key, "failed", reason); failed++; logf_("  FAILED %s (try %d of %d): %s", g.key, state_get(g.key)->tries, MAX_TRIES, reason); }
+            } else if (update_starter(&c, g.tid, tid_dir(g.tid))) updated++;
+            continue;
+        }
         st_t *s = state_get(g.key);
         int size_refusal = s && !strcmp(s->status, "refused") && !strncmp(s->reason, "starter would be", 16);   // re-checked: free space changes
         if (s && ((!strcmp(s->status, "refused") && !size_refusal) || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES) || !strcmp(s->status, "done"))) { known++; continue; }
@@ -878,15 +1028,15 @@ static int sync_once(void) {
         }
         strcpy(done_tids[ndone++], g.tid);
         char reason[600] = "";
-        int rc = build_game(&c, &g, cfw, reason, sizeof reason);
+        int rc = build_game(&c, &g, cfw, reason, sizeof reason, 0);
         if (rc == 0) { state_set(g.key, "done", reason); built++; logf_("  done %s -> %s", g.key, reason); tids_in(g.tid); }
         else if (rc == 1) { state_set(g.key, "refused", reason); refused++; logf_("  refused %s %s: %s", g.key, g.title, reason); }
         else { state_set(g.key, "failed", reason); failed++; logf_("  FAILED %s %s (try %d of %d): %s", g.key, g.title, state_get(g.key)->tries, MAX_TRIES, reason); }
     }
     free(txt);
     char dp[600];
-    logf_("pass: %d images listed by %s:%d, %d already on the console, %d built, %d refused, %d failed, %d settled earlier (state file); /data free %lld MB",
-          listed_n, c.host, c.port, present, built, refused, failed, known, free_mb(P(dp, sizeof dp, "/data")));
+    logf_("pass: %d images listed by %s:%d, %d already on the console (%d updated), %d built, %d refused, %d failed, %d settled earlier (state file); /data free %lld MB",
+          listed_n, c.host, c.port, present, updated, built, refused, failed, known, free_mb(P(dp, sizeof dp, "/data")));
     return 0;
 }
 
