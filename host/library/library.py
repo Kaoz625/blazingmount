@@ -43,6 +43,8 @@ S = {}
 def sysdef(key, label, family, libretro, igdb, plays):
     S[key] = dict(key=key, label=label, family=family, libretro=libretro, igdb=igdb, plays=plays)
 sysdef("ps5", "PS5", "PlayStation", None, 167, "PS5: streams with BlazingMount (starter + the image on the drives)")
+PS5_NOT_PACKED = "PS5: BlazingMount streams it once it is packed (.ffpfsc) on the drives"
+PS5_NOT_ON_DRIVES = "PS5: not on the drives yet (BlazingMount streams it once a packed copy is there)"
 sysdef("ps4", "PS4", "PlayStation", "Sony_-_PlayStation_4", 48, "PS5: PS4 games stream through the link (PHAT5, Freedom Cry proven 23 Oct)")
 sysdef("ps3", "PS3", "PlayStation", "Sony_-_PlayStation_3", 9, "RPCS3 (Dell / PS5 port)")
 sysdef("ps2", "PS2", "PlayStation", "Sony_-_PlayStation_2", 8, "PS5: PS5SX2 (120 fps PS2 emulator)")
@@ -264,6 +266,9 @@ def cmd_index(a):
         if not e:
             e = entry("ps5", g["name"].rsplit(".", 1)[0]); e["ids"].append(g["tid"]); e["how"] = e["how"] or "on_drive"
         e["stream"] = dict(key=g["key"], tid=g["tid"], version=g.get("version", ""), fw=g.get("fw", ""))
+    for e in by.values():   # a PS5 game streams only from a packed image imgserve serves: say what is missing instead
+        if e["system"] == "ps5" and not e["stream"]:
+            e["plays"] = PS5_NOT_PACKED if e["files"] else PS5_NOT_ON_DRIVES
     games = sorted(by.values(), key=lambda e: (list(S).index(e["system"]), norm(e["title"])))
     systems = collections.Counter(e["system"] for e in games)
     body = dict(version=1, made=time.strftime("%Y-%m-%d %H:%M:%S"), source=dict(owned=a.owned, drives=DRIVES, imgserve=IMGSERVE),

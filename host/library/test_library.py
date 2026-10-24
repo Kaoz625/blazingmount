@@ -72,6 +72,8 @@ try:
     check(gow and gow["files"][0]["verified"] and gow["files"][0]["type"] == "iso" and gow["files"][0]["size"] == 20, "file type, size, verified")
     gt = by.get(("ps5", "Gran Turismo 7"))
     check(gt and gt["files"] and gt["files"][0]["icon"].endswith("icon0.png") and gt["how"] == "owned", "a not-packed PS5 folder joins its owned row by title id, icon0 found")
+    check(gt and gt["plays"] == L.PS5_NOT_PACKED, "a not-packed PS5 folder does not claim it streams: 'once it is packed'")
+    check(by[("ps5", "Alan Wake 2")]["plays"] == L.PS5_NOT_ON_DRIVES, "an owned PS5 game with no copy says it is not on the drives")
     sms = by.get(("gc", "Super Mario Sunshine"))
     check(sms and sms["files"] and sms["files"][0]["type"] == "rvz" and "Dolphin" in sms["plays"], "retro file joins the owned row; plays on")
     check(not any(g["title"] == "settings" for g in lib["games"]), "junk files (settings.bin) are not games")

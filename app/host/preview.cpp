@@ -4,6 +4,7 @@
 //
 //   app/host/preview.sh [outdir]                      build + every shot from app/fixtures (real API answers)
 //   preview <font.sdf> <fixtures dir> <outdir> [shot...]
+//   BM_HOSTDATA=http://127.0.0.1:4451 app/host/preview.sh   the same shots against the LIVE library + covers on imgserve
 //
 // Each shot walks the app with the presses a person would make, so a picture is also a check that the path to it works.
 // It also checks the rules every frame: no text under 20 px, nothing past the right gutter, no unknown {TOKENS}.
@@ -26,6 +27,21 @@ std::string Read(const std::string& p) {
   return s.str();
 }
 
+// BM_HOSTDATA=http://127.0.0.1:4451 reads the host's LIVE files from imgserve (the routes blazingmountd passes through:
+// /library.json, /covers.json, /covers/<thumb|full|sheet>/<id>.jpg); a folder path reads the same names from disk.
+std::string HostData(const std::string& base, const std::string& rel) {
+  if (base.rfind("http://", 0) != 0) return Read(base + "/" + rel);
+  std::string url = base + "/" + (rel == "library.json" || rel == "covers.json" ? rel : "covers/" + rel);
+  if (url.find_first_of("'\\ \n") != std::string::npos) return "";
+  std::string body;
+  if (FILE* p = popen(("curl -s -f --max-time 30 '" + url + "'").c_str(), "r")) {
+    char buf[65536];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, p)) > 0;) body.append(buf, n);
+    if (pclose(p) != 0) body.clear();
+  }
+  return body;
+}
+
 struct Rig {
   bm::App app;
   std::string dir;
@@ -45,7 +61,7 @@ struct Rig {
         if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0) {   // BM_HOSTDATA: the host's files
           const char* d = std::getenv("BM_HOSTDATA");
           std::string rel = base == "/api/catalog" ? "library.json" : base == "/api/covers.json" ? "covers.json" : r.path.substr(11);
-          std::string data = d ? Read(std::string(d) + "/" + rel) : "";
+          std::string data = d ? HostData(d, rel) : "";
           app.OnResponse(r.path, data.empty() ? 404 : 200, data);
           continue;
         }

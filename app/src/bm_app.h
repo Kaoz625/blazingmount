@@ -784,7 +784,14 @@ class App {
     b.Rect(px, y - 14, px + pw, y - 12, c::kLine);
     const char* how = it->how == "owned" ? "Owned" : it->how == "ps_plus" ? "PS Plus (yours while Plus is on)" : it->how == "licence" ? "Licence on DIGI5"
                     : it->how == "free" ? "Free with the console" : it->how == "package" ? "Installed from a package" : "On my drives";
-    Fact(b, px, y, pw, "System", SystemLabel(*it) + (it->ids.empty() ? "" : "   " + it->ids.substr(0, 40)));
+    std::string ids = it->ids;   // whole ids only: cut at the last ", " that fits, then "+N more" (never a dangling comma)
+    if (ids.size() > 40) {
+      size_t cut = ids.rfind(", ", 40);
+      int rest = 0;
+      for (size_t p = cut; p != std::string::npos; p = ids.find(", ", p + 2)) ++rest;
+      ids = cut == std::string::npos ? ids.substr(0, ids.find(", ")) : ids.substr(0, cut) + "  +" + std::to_string(rest) + " more";
+    }
+    Fact(b, px, y, pw, "System", SystemLabel(*it) + (ids.empty() ? "" : "   " + ids));
     Fact(b, px, y, pw, "Yours", how);
     if (it->files) {
       std::string f = it->firstPath + "   " + std::string(it->firstType == "folder" ? "" : ".") + it->firstType + (it->compressed ? " (compressed)" : " (not compressed)") + (it->verified ? ", verified" : "")
