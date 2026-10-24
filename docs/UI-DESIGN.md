@@ -342,6 +342,40 @@ app ships the way pldmgr and Orbit ship their tiles.
 8. **Launch** from the app. Markus's rule: start games like a person, through the home screen tile. So the app's "Play"
    would only point to the tile; it never uses appmove.
 
+## 10.5 Phase 3: DISCOVER (after the core library)
+
+Discover is a fourth tab next to Library, Activity and Settings. It shows games Markus does not have yet, with the same covers and grid.
+
+**Rows.** Each row is a shelf, filtered to his systems:
+- **New releases**: the last 30 days, from IGDB `release_dates` (date ≤ today, platform in his systems), most-hyped first.
+- **Coming soon**: the next 90 days, from IGDB `release_dates` (date > today) plus the `hypes` field.
+- **Popular**: IGDB `popularity_primitives` (most-visited and most-played lists), filtered to his systems.
+- **Not owned in series he plays**: franchises in his library (IGDB `franchises` / `collections`) that he lacks entries of.
+
+**Badges on every card**, joined against `library.json` by IGDB id, then normalised title + system:
+- **OWNED** (green): in his library. The badge shows how (owned / PS Plus).
+- **ON MY DRIVES**: in the library and on the drives.
+- **WISHLIST** (accent outline): he added it.
+- **NOT OWNED** (dim): neither.
+
+**Wishlist.**
+- `TRIANGLE` adds or removes the focused game. That press is an action to blazingmountd.
+- The payload forwards it to the host (`POST /wishlist` on imgserve, written to `~/.blazing/library/wishlist.json` on mac1), so one wishlist serves both consoles and every client.
+- A Wishlist filter appears on Discover and in Library (OPTIONS).
+
+**Release-date alerts.**
+- A wishlist game whose release date arrives (or moves) raises a PS5 notice on the consoles, through the payload's notice path.
+- It also posts a hub line, plus whatever channel Markus picks (Telegram).
+- Release dates are re-read once a day in one batch. They are stored state, not a polling storm (IGDB at ≤ 4 requests a second).
+
+**Pipeline, the same as the library.**
+- `library.py discover` on mac1 writes `~/.blazing/library/discover.json` (ETag), with sections, each entry carrying `igdb_id`, title, systems, release date, hype and cover id.
+- Covers are fetched once through the same IGDB → JPEG full/thumb/colour → sprite-sheet path, as their own sheet range (`dsheet/<n>.jpg`).
+- imgserve serves `/discover.json` + `/covers/dsheet/...`. blazingmountd passes them through (`/api/discover`). The app loads only the visible shelves plus one ahead, inside the same fixed 16 MB atlas.
+- `watch` refreshes Discover daily and the library when the drives change.
+
+**Not in scope:** buying, any store or PSN page, or any account automation (Markus's rule: never automate his PSN account). Discover only shows and remembers.
+
 ## 11. Files
 
 | Path | What |
