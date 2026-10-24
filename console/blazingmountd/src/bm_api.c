@@ -973,8 +973,18 @@ static void *api_thread(void *arg) {
     return NULL;
 }
 
+// The API thread's stack is set here, the same on the console and in the host tests. The console's default thread stack is small:
+// v2.7-a7ce6b8 on PHAT5 (24 Oct 2026) died on its first GET /api/library with SIGSEGV "user write data, page not present" 8 bytes
+// below rsp (api_handle -> api_library's 31 KB conf_t -> scan_local's path buffers ran off the end). A host build with
+// -DBM_API_STACK=65536 dies the same way in test_api, so the host tests now run with the console's real stack size.
+#ifndef BM_API_STACK
+#define BM_API_STACK (1u << 20)
+#endif
 static void bm_api_start(void) {
-    pthread_t t;
-    if (pthread_create(&t, NULL, api_thread, NULL) == 0) { pthread_detach(t); g_api_started = 1; }
+    pthread_t t; pthread_attr_t at; pthread_attr_init(&at);
+    int sr = pthread_attr_setstacksize(&at, BM_API_STACK);
+    if (sr) logf_("ui: API thread stack %u bytes refused (%d): the default is used", (unsigned)BM_API_STACK, sr);
+    if (pthread_create(&t, &at, api_thread, NULL) == 0) { pthread_detach(t); g_api_started = 1; }
     else logf_("ui: API thread did not start (errno %d)", errno);
+    pthread_attr_destroy(&at);
 }

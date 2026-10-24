@@ -112,7 +112,8 @@ def main():
                                                                'static const unsigned char bm_fork[] = "blz_link";\n')
         exe = os.path.join(work, "bmd")
         r = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-std=gnu11", '-DBM_VERSION="api-test"', "-DBM_API_PORT=%d" % aport,
-                            "-DAPI_WATCH_S=2", "-I", inc, "-o", exe, main_c], capture_output=True, text=True)
+                            "-DAPI_WATCH_S=2"] + os.environ.get("BM_TEST_DEFS", "").split() +   # e.g. BM_TEST_DEFS=-DBM_API_STACK=65536
+                           ["-I", inc, "-o", exe, main_c], capture_output=True, text=True)
         check(r.returncode == 0 and "warning" not in r.stderr, "build with the API hooks, no warnings" + (": " + r.stderr[:400] if r.stderr else ""))
         if r.returncode:
             return 1
