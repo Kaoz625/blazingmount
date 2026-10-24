@@ -330,7 +330,8 @@ def libretro_url(e):
     repo = S[e["system"]]["libretro"]
     if not repo: return None
     exact, loose = libretro_names(repo)
-    for t in [e["title"]] + e["variants"] + [os.path.basename(f["path"]).rsplit(".", 1)[0] for f in e["files"]]:
+    names = sorted(e["variants"], key=lambda v: (0 if "(USA" in v else 1 if "(World" in v else 2 if "(Europe" in v else 3))   # his region first
+    for t in names + [e["title"]] + [os.path.basename(f["path"]).rsplit(".", 1)[0] for f in e["files"]]:
         safe = re.sub(r'[&*/:`<>?\\|"]', "_", t)   # libretro's file-name rule
         if safe in exact:
             return "https://raw.githubusercontent.com/libretro-thumbnails/%s/master/Named_Boxarts/%s" % (repo, urllib.parse.quote(exact[safe]))
