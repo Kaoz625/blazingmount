@@ -359,20 +359,61 @@ Discover is a fourth tab next to Library, Activity and Settings. It shows games 
 - **NOT OWNED** (dim): neither.
 
 **Wishlist.**
-- `TRIANGLE` adds or removes the focused game. That press is an action to blazingmountd.
-- The payload forwards it to the host (`POST /wishlist` on imgserve, written to `~/.blazing/library/wishlist.json` on mac1), so one wishlist serves both consoles and every client.
-- A Wishlist filter appears on Discover and in Library (OPTIONS).
+- `TRIANGLE` adds or removes the focused game. That press is an action to blazingmountd: `POST /api/action?do=wish&id=<id>&value=1|0` (the same `X-BM-Request: 1` guard as every action).
+- The payload's API thread forwards it at once to the host: `POST /wishlist?id=<id>&on=1|0` on imgserve, which writes `~/.blazing/library/wishlist.json` on mac1. One wishlist serves both consoles and every client.
+- The app shows the change at once and says so in a toast. If mac1 does not answer, the toast says that and the card goes back.
+- The Wishlist is its own shelf on Discover.
+
+**Why this write path (24 Oct, blazingmount-ui-agent-2).** It was the simplest safe option of the three:
+- **Console-side wishlist, pulled by mac1.** This needs a mac1 timer that reaches into both consoles, plus a merge rule for two lists. The console would also keep a file that grows.
+- **A second server on mac1.** One more window to keep running, and the consoles would need a second port.
+- **One write route on imgserve (chosen).** It is the server both consoles already reach, at home and away (the tsnet proxy carries it). It has one writer (imgserve) for one small file:
+  - It accepts a write only from a home or tailnet address (192.168/16, 10/8, 127/8, 100.64/10) and only with the `X-BM-Request: 1` header. A web page cannot send that header without a preflight that imgserve never answers.
+  - The id must be a game in `discover.json`. imgserve copies that game's title, IGDB id and date from it, so a press cannot write free text.
+  - The file is capped at 1,000 games and written to a temp file, then renamed.
 
 **Release-date alerts.**
-- A wishlist game whose release date arrives (or moves) raises a PS5 notice on the consoles, through the payload's notice path.
-- It also posts a hub line, plus whatever channel Markus picks (Telegram).
-- Release dates are re-read once a day in one batch. They are stored state, not a polling storm (IGDB at ≤ 4 requests a second).
+- `discover.json` carries an `alerts` list, made on mac1 from the wishlist:
+  - **out**: the release date has arrived.
+  - **moved**: IGDB's date is no longer the date the game had when he added it.
+- **In the app:** the Discover tab label gets a red count of the OUT NOW games. Their cards and detail say OUT NOW.
+- **PS5 notice:** blazingmountd checks the alerts at the start of every pass, with a conditional GET (`If-None-Match`, so it downloads only when the file changed). Each alert raises ONE notice: "Out now: <title> (on your wishlist)" or "New date for <title>: <date> (wishlist)". The alert's key goes into `/data/blazing/alerts-seen.tsv`. That file is capped at 200 lines, so it never grows.
+- Release dates are re-read once a day in one batch (IGDB at ≤ 4 requests a second). The `out` flip needs no IGDB call: it is the date against today, recomputed every watch cycle.
+
+**Refresh: no hidden timers.**
+- `library.py watch` (the visible `watch.command` window) remakes Discover when `discover.json` is older than 24 h, and remakes the alerts every cycle.
+- **On demand:** when the app asks for `/discover.json` and it is older than 24 h (or missing), imgserve touches `discover.wanted`. The watch loop looks for that marker every 15 s and refreshes at once.
+- Nothing else runs on a timer, and nothing calls IGDB unless one of those two things happens.
 
 **Pipeline, the same as the library.**
-- `library.py discover` on mac1 writes `~/.blazing/library/discover.json` (ETag), with sections, each entry carrying `igdb_id`, title, systems, release date, hype and cover id.
-- Covers are fetched once through the same IGDB → JPEG full/thumb/colour → sprite-sheet path, as their own sheet range (`dsheet/<n>.jpg`).
-- imgserve serves `/discover.json` + `/covers/dsheet/...`. blazingmountd passes them through (`/api/discover`). The app loads only the visible shelves plus one ahead, inside the same fixed 16 MB atlas.
-- `watch` refreshes Discover daily and the library when the drives change.
+- `library.py discover` on mac1 writes `~/.blazing/library/discover.json` (ETag), about 15 IGDB requests plus one per system he plays.
+  - **His systems:** every system in `library.json` with an IGDB platform and at least 3 games.
+  - New, Coming soon and Popular use the current ones: PS5, PS4, Switch, Switch 2, PC, Xbox Series, Xbox One.
+  - **Notable** = the best-rated games (≥ 50 ratings, no editions) on each system he plays, retro included, that he does not own.
+  - Every wishlisted game is re-read by id, so its date stays current even when it is on no shelf.
+- **Join with `library.json`:** first `eid(system, title)` on each of the game's systems, then the normalised title across his systems. The result is owned (how), on my drives (files), or not owned.
+- **Each entry:** `id` (12 hex of `igdb:<n>`), `igdb`, title, `date` (earliest on his systems) and `date_text`, `systems`, hype, rating and votes, `summary` (≤ 300 chars), `owned`, `on_drives`, colour, `page`/`cell` in the `dsheet` sheets.
+- **Shelves:** `new`, `soon`, `popular`, `notable`, `wishlist`.
+- **Covers** are fetched once (IGDB `t_cover_big`) through the same JPEG full/thumb/colour path and `state.jsonl`, into their own sprite sheets `dsheet/<n>.jpg` (64 a page, in Discover order).
+- **imgserve** serves `/discover.json` (ETag), `/wishlist.json` and `/covers/dsheet/<n>.jpg`, plus the one write route above.
+- **blazingmountd** passes `/api/discover`, `/api/wishlist` and `/api/cover/dsheet/<n>.jpg` through. Nothing is kept on the console except the capped alerts-seen file.
+
+**The screen** (the same grid, focus and detail panel as the Library):
+- Tabs: `L1 Library · Discover · Activity · Settings R1`.
+- **Shelf chips (`L2`/`R2`)** with counts: New releases, Coming soon, Popular, Notable I don't own, Wishlist.
+- **`OPTIONS`** walks his systems (All, PS5, PS4, Switch, PC, Xbox, then retro), and only the ones on that shelf.
+- **Badge on each card:** OUT NOW (solid red), WISHLIST (red outline), OWNED / ON MY DRIVES (green), or NOT OWNED (dim).
+- **Detail panel:** Out / Release with "in N days" or "out since", Systems, Yours, Rating (votes) or Waiting (hype), About (the summary).
+- **Hint line:** `TRIANGLE Add to wishlist` or `TRIANGLE Remove from wishlist`. `CIRCLE` quits as everywhere.
+
+**Tests:**
+- `host/library/test_discover.py`: the join, the shelves, the wishlist alerts, the 24 h and on-demand refresh rule, all against a fake IGDB.
+- `host/test_api.py`:
+  - a wish press is forwarded with the header, and a bad id is refused
+  - the pass-through and the dsheet name check work
+  - an alert raises one notice, never twice
+  - the seen file stays capped
+- `app/host/preview.sh`: the Discover shots.
 
 **Not in scope:** buying, any store or PSN page, or any account automation (Markus's rule: never automate his PSN account). Discover only shows and remembers.
 

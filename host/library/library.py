@@ -471,6 +471,193 @@ def cmd_sheets(a):
               open(os.path.join(COV, "covers.json"), "w"), separators=(",", ":"))
     print("sheets: %d pages of %d; covers.json %d entries" % (pages, per, len(index)))
 
+# ---------------------------------------------------------------- DISCOVER (phase 3, docs/UI-DESIGN.md 10.5): games he does not have yet
+# discover.json = shelves (new, soon, popular, notable, wishlist) of IGDB games joined against library.json, an `alerts` list made
+# from the wishlist (imgserve writes wishlist.json; this only reads it), covers in their own sprite sheets (dsheet/<n>.jpg).
+# Runs only from the visible watch loop: when discover.json is older than 24 h, or at once when imgserve left `discover.wanted`.
+CURRENT = ["ps5", "ps4", "switch", "switch2", "pc", "xsx", "xone"]      # new / coming soon / popular: the systems that still get games
+DAY = 86400
+SHELVES = [("new", "New releases"), ("soon", "Coming soon"), ("popular", "Popular"), ("notable", "Notable I don't own"), ("wishlist", "Wishlist")]
+GAME_FIELDS = ("fields name,cover.image_id,first_release_date,release_dates.date,release_dates.platform,platforms,hypes,total_rating,"
+               "total_rating_count,summary,version_parent;")
+
+def did(igdb_id):
+    return hashlib.sha1(("igdb:%d" % int(igdb_id)).encode()).hexdigest()[:12]
+
+def igdb_query(ig, endpoint, body):
+    """one IGDB v4 request at <= 4 a second; one retry after a 429"""
+    for attempt in (0, 1):
+        wait = 0.26 - (time.time() - ig.last)
+        if wait > 0: time.sleep(wait)
+        ig.last = time.time()
+        try:
+            return json.loads(http_get("https://api.igdb.com/v4/" + endpoint, data=body.encode(),
+                                       headers={"Client-ID": ig.cid, "Authorization": "Bearer " + ig.token}))
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt: raise
+            time.sleep(1.5)
+
+def his_systems(lib, minimum=3):
+    """system key -> IGDB platform id, for every system he has at least `minimum` games on"""
+    return {s["key"]: S[s["key"]]["igdb"] for s in lib["systems"] if s["count"] >= minimum and S.get(s["key"], {}).get("igdb")}
+
+def owned_index(lib):
+    by_id = {g["id"]: g for g in lib["games"]}
+    by_norm = {}
+    for g in lib["games"]: by_norm.setdefault(norm(g["title"]), g)
+    return by_id, by_norm
+
+def join_owned(name, systems, by_id, by_norm):
+    """the library entry that is this game: eid(system, title) on one of its systems first, then the normalised title anywhere"""
+    for k in systems:
+        g = by_id.get(eid(k, name))
+        if g: return g
+    return by_norm.get(norm(name))
+
+def discover_entry(r, plat2sys, by_id, by_norm, today):
+    systems = [plat2sys[p] for p in (r.get("platforms") or []) if p in plat2sys]
+    dates = [d["date"] for d in (r.get("release_dates") or []) if d.get("date") and d.get("platform") in plat2sys]
+    date = min(dates) if dates else (r.get("first_release_date") or 0)
+    g = join_owned(r.get("name", ""), systems, by_id, by_norm)
+    summ = (r.get("summary") or "").replace("\n", " ").strip()
+    if len(summ) > 300: summ = summ[:297].rsplit(" ", 1)[0] + "..."
+    return dict(id=did(r["id"]), igdb=r["id"], title=r.get("name", ""), date=int(date), date_text=time.strftime("%-d %b %Y", time.localtime(date)) if date else "",
+                systems=systems, sys_labels=", ".join(S[k]["label"] for k in systems), hype=int(r.get("hypes") or 0),
+                rating=int(round(r.get("total_rating") or 0)), votes=int(r.get("total_rating_count") or 0), summary=summ,
+                owned=(g["how"] or "owned") if g else "", on_drives=bool(g and g["files"]), lib_id=g["id"] if g else "",
+                cover_image=(r.get("cover") or {}).get("image_id", ""), shelves=[])
+
+def make_alerts(wish_items, current, today):
+    """wishlist -> alerts. out: its date has arrived (and is at most 60 days old); moved: IGDB's date differs from the date it had when added"""
+    out = []
+    for w in wish_items:
+        cur = int(current.get(w["id"], w.get("date") or 0) or 0)
+        if cur and today - 60 * DAY < cur <= today:
+            out.append(dict(id=w["id"], title=w.get("title", ""), kind="out", date=cur, key="%s:out:%d" % (w["id"], cur)))
+        elif cur and w.get("date") and cur != int(w["date"]) and cur > today:
+            out.append(dict(id=w["id"], title=w.get("title", ""), kind="moved", date=cur, key="%s:moved:%d" % (w["id"], cur)))
+    for a in out: a["date_text"] = time.strftime("%-d %b %Y", time.localtime(a["date"]))
+    return out
+
+def load_wishlist():
+    try: return json.load(open(os.path.join(LIB, "wishlist.json"))).get("items", [])
+    except (OSError, ValueError): return []
+
+def write_discover(body):
+    """discover.json + discover.etag, each renamed into place (a console never reads half a file); ETag = the content without `made`"""
+    etag = hashlib.sha256(json.dumps({k: v for k, v in body.items() if k != "made"}, sort_keys=True).encode()).hexdigest()[:16]
+    body["etag"] = etag
+    tmp = os.path.join(LIB, "discover.json.tmp")
+    open(tmp, "w").write(json.dumps(body, ensure_ascii=False, separators=(",", ":"))); os.replace(tmp, os.path.join(LIB, "discover.json"))
+    open(tmp, "w").write(etag + "\n"); os.replace(tmp, os.path.join(LIB, "discover.etag"))
+    return etag
+
+def cmd_discover(a, ig=None, today=None):
+    lib = json.load(open(os.path.join(LIB, "library.json")))
+    today = int(today or time.time())
+    ig = ig or Igdb()
+    mine = his_systems(lib)
+    plat2sys = {pid: k for k, pid in mine.items()}
+    cur_plats = ",".join(str(mine[k]) for k in CURRENT if k in mine)
+    by_id, by_norm = owned_index(lib)
+    games, shelves = {}, {k: [] for k, _ in SHELVES}
+    def add(rows, shelf, keep, want=lambda e: True):
+        n = 0
+        for r in rows:
+            if n >= keep: break
+            if not r.get("id") or not (r.get("cover") or {}).get("image_id"): continue
+            e = games.get(did(r["id"])) or discover_entry(r, plat2sys, by_id, by_norm, today)
+            if not e["systems"] or not want(e): continue
+            games[e["id"]] = e
+            if shelf not in e["shelves"]: e["shelves"].append(shelf); shelves[shelf].append(e["id"])
+            n += 1
+    if cur_plats:
+        new = igdb_query(ig, "games", GAME_FIELDS + " where first_release_date >= %d & first_release_date <= %d & platforms = (%s) & cover != null"
+                         " & version_parent = null; sort first_release_date desc; limit 200;" % (today - 30 * DAY, today, cur_plats))
+        new = [r for r in new if (r.get("hypes") or 0) + (r.get("total_rating_count") or 0) > 0]
+        add(sorted(new, key=lambda r: -((r.get("hypes") or 0) + (r.get("total_rating_count") or 0))), "new", 48)
+        soon = igdb_query(ig, "games", GAME_FIELDS + " where first_release_date > %d & first_release_date <= %d & platforms = (%s) & cover != null"
+                          " & version_parent = null & hypes > 0; sort hypes desc; limit 120;" % (today, today + 120 * DAY, cur_plats))
+        add(sorted(soon[:60], key=lambda r: r.get("first_release_date") or 0), "soon", 60)
+        pop = igdb_query(ig, "popularity_primitives", "fields game_id,value; where popularity_type = 1; sort value desc; limit 200;")
+        order = [p["game_id"] for p in pop if p.get("game_id")]
+        if order:
+            rows = igdb_query(ig, "games", GAME_FIELDS + " where id = (%s) & platforms = (%s); limit 200;" % (",".join(map(str, order)), cur_plats))
+            rank = {gid: i for i, gid in enumerate(order)}
+            add(sorted(rows, key=lambda r: rank.get(r["id"], 1 << 30)), "popular", 48)
+    for k, pid in sorted(mine.items(), key=lambda kv: -next(s["count"] for s in lib["systems"] if s["key"] == kv[0])):
+        rows = igdb_query(ig, "games", GAME_FIELDS + " where platforms = (%d) & total_rating_count >= 20 & cover != null & version_parent = null;"
+                          " sort total_rating desc; limit 40;" % pid)
+        add(rows, "notable", 10, want=lambda e: not e["owned"])
+    wish = load_wishlist()
+    ids = [int(w["igdb"]) for w in wish if w.get("igdb")]
+    if ids:
+        add(igdb_query(ig, "games", GAME_FIELDS + " where id = (%s); limit 500;" % ",".join(map(str, ids[:500]))), "wishlist", 500)
+    covers_for(list(games.values()))
+    order = [i for k, _ in SHELVES for i in shelves[k]]
+    seen, flat = set(), []
+    for i in order:
+        if i not in seen: seen.add(i); flat.append(games[i])
+    dsheets(flat)
+    alerts = make_alerts(wish, {e["id"]: e["date"] for e in flat}, today)
+    for e in flat: e.pop("cover_image", None)
+    body = dict(version=1, made=time.strftime("%Y-%m-%d %H:%M:%S"), today=time.strftime("%Y-%m-%d", time.localtime(today)), alerts=alerts,
+                shelves=[dict(key=k, label=l, ids=shelves[k]) for k, l in SHELVES], games=flat)
+    etag = write_discover(body)
+    print("discover: %s; %d alerts; etag %s" % (", ".join("%s %d" % (k, len(shelves[k])) for k, _ in SHELVES), len(alerts), etag), flush=True)
+
+def cmd_alerts(a=None, today=None):
+    """the alerts only (no IGDB): the wishlist against today and the dates in discover.json; rewrites discover.json only when they change"""
+    p = os.path.join(LIB, "discover.json")
+    try: body = json.load(open(p))
+    except (OSError, ValueError): return False
+    today = int(today or time.time())
+    alerts = make_alerts(load_wishlist(), {e["id"]: e["date"] for e in body.get("games", [])}, today)
+    if [x["key"] for x in alerts] == [x["key"] for x in body.get("alerts", [])]: return False
+    body["alerts"] = alerts
+    body["made"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    write_discover(body)
+    print("%s: discover alerts now %s" % (time.strftime("%H:%M:%S"), ", ".join("%s %s" % (x["kind"], x["title"]) for x in alerts) or "none"), flush=True)
+    return True
+
+def discover_due(now=None):
+    """refresh when discover.json is missing or older than 24 h, or imgserve asked (`discover.wanted`) and it is older than 24 h"""
+    now = now or time.time()
+    try: age = now - os.path.getmtime(os.path.join(LIB, "discover.json"))
+    except OSError: return True
+    return age > DAY
+
+def covers_for(entries):
+    """each Discover game's IGDB cover, fetched ONCE (state.jsonl, the same full/thumb store as the library)"""
+    for d in ("full", "thumb", "dsheet"): os.makedirs(os.path.join(COV, d), exist_ok=True)
+    st = load_state()
+    for e in entries:
+        if e["id"] in st or not e.get("cover_image"): continue
+        url = "https://images.igdb.com/igdb/image/upload/t_cover_big/%s.jpg" % e["cover_image"]
+        try: raw = http_get(url, timeout=30)
+        except Exception: save_state(dict(id=e["id"], ok=False, source="igdb-discover", url=url, why="download failed")); continue
+        r = make_images(e["id"], raw)
+        if not r: save_state(dict(id=e["id"], ok=False, source="igdb-discover", url=url, why="unreadable image")); continue
+        save_state(dict(id=e["id"], ok=True, source="igdb-discover", url=url, colour=r[0], w=r[1][0], h=r[1][1], matched=e["title"], at=int(time.time())))
+
+def dsheets(entries):
+    """Discover's own sprite sheets: 64 thumbs of 128 px a page, in Discover order; page/cell/colour go into each entry"""
+    from PIL import Image
+    st = load_state()
+    per, cells = 64, 128
+    pages = (len(entries) + per - 1) // per
+    for p in range(pages):
+        sheet = Image.new("RGB", (1024, 1024), (10, 10, 11))
+        for i, e in enumerate(entries[p * per:(p + 1) * per]):
+            s = st.get(e["id"], {})
+            e.update(page=p, cell=i, colour=s.get("colour", ""), cover=bool(s.get("ok")))
+            if not s.get("ok"): continue
+            th = Image.open(os.path.join(COV, "thumb", e["id"] + ".jpg")).convert("RGB")
+            th.thumbnail((cells, cells), Image.LANCZOS)
+            sheet.paste(th, ((i % 8) * cells + (cells - th.width) // 2, (i // 8) * cells + (cells - th.height) // 2))
+        tmp = os.path.join(COV, "dsheet", "%d.jpg.tmp" % p)
+        sheet.save(tmp, format="JPEG", quality=85, optimize=True); os.replace(tmp, os.path.join(COV, "dsheet", "%d.jpg" % p))
+
 # ---------------------------------------------------------------- serve (until imgserve has the same routes)
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *x): pass
@@ -518,17 +705,42 @@ def signature(owned):
     except Exception: pass
     return h.hexdigest()
 
+def watch_discover(wanted_path=None, now=None):
+    """one look at Discover from the watch loop: the alerts every time; a full refresh when it is due (older than 24 h) or imgserve
+    left `discover.wanted` (the app asked and the file was old). Returns what it did ('refresh', 'alerts', '')."""
+    wanted_path = wanted_path or os.path.join(LIB, "discover.wanted")
+    asked = os.path.exists(wanted_path)
+    if asked:
+        try: os.remove(wanted_path)
+        except OSError: pass
+    if discover_due(now):
+        try:
+            print("%s: Discover refresh (%s)" % (time.strftime("%H:%M:%S"), "the app asked" if asked else "older than 24 h"), flush=True)
+            cmd_discover(None)
+            return "refresh"
+        except Exception as ex:
+            print("  Discover refresh failed: %s (next try in an hour)" % ex, flush=True)
+            try: os.utime(os.path.join(LIB, "discover.json"), (time.time() - DAY + 3600,) * 2)   # retry in an hour, not every 15 s
+            except OSError: pass
+            return ""
+    return "alerts" if cmd_alerts(None) else ""
+
 def cmd_watch(a):
-    last = None
+    last, next_full = None, 0.0
     while True:
-        sig = signature(a.owned)
-        if sig != last:
-            if last is not None: print("%s: the drives or the owned list changed: index, new covers, sheets" % time.strftime("%H:%M:%S"), flush=True)
-            a.fast = False; cmd_index(a)
-            a.only, a.limit = None, 0; cmd_covers(a)
-            cmd_sheets(a)
-            last = sig
-        time.sleep(a.every)
+        if time.time() >= next_full:
+            sig = signature(a.owned)
+            if sig != last:
+                if last is not None: print("%s: the drives or the owned list changed: index, new covers, sheets" % time.strftime("%H:%M:%S"), flush=True)
+                a.fast = False; cmd_index(a)
+                a.only, a.limit = None, 0; cmd_covers(a)
+                cmd_sheets(a)
+                last = sig
+            next_full = time.time() + a.every
+            watch_discover()
+        elif os.path.exists(os.path.join(LIB, "discover.wanted")):
+            watch_discover()
+        time.sleep(15)
 
 def cmd_stats(a):
     lib = json.load(open(os.path.join(LIB, "library.json")))
@@ -542,8 +754,10 @@ def main():
     sp.add_parser("sheets"); sp.add_parser("stats")
     p = sp.add_parser("watch"); p.add_argument("--owned", default=os.path.join(LIB, "D5-WHAT-MARKUS-HAD.md")); p.add_argument("--every", type=int, default=300)
     p = sp.add_parser("serve"); p.add_argument("--port", type=int, default=4453)
+    sp.add_parser("discover"); sp.add_parser("alerts")
     a = ap.parse_args()
-    dict(index=cmd_index, covers=cmd_covers, sheets=cmd_sheets, serve=cmd_serve, stats=cmd_stats, watch=cmd_watch)[a.cmd](a)
+    dict(index=cmd_index, covers=cmd_covers, sheets=cmd_sheets, serve=cmd_serve, stats=cmd_stats, watch=cmd_watch, discover=cmd_discover,
+         alerts=cmd_alerts)[a.cmd](a)
 
 if __name__ == "__main__":
     main()
