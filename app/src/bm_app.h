@@ -757,7 +757,7 @@ class App {
       b.Text(tx, y0 + 9, Fit(b, it.title, St(kBody, f ? c::kTextHi : c::kText), tw).c_str(), St(kBody, f ? c::kTextHi : c::kText));
       std::string meta = SystemLabel(it);
       if (!it.ids.empty()) meta += "  \xC2\xB7  " + it.ids.substr(0, it.ids.find(','));
-      if (it.files) meta += "  \xC2\xB7  ." + it.firstType + (it.compressed ? " compressed" : "") + "  \xC2\xB7  " + Gb(it.size);
+      if (it.files) meta += "  \xC2\xB7  " + std::string(it.firstType == "folder" ? "" : ".") + it.firstType + (it.compressed ? " compressed" : "") + "  \xC2\xB7  " + Gb(it.size);
       else meta += "  \xC2\xB7  not on my drives";
       b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
     }
@@ -787,7 +787,7 @@ class App {
     Fact(b, px, y, pw, "System", SystemLabel(*it) + (it->ids.empty() ? "" : "   " + it->ids.substr(0, 40)));
     Fact(b, px, y, pw, "Yours", how);
     if (it->files) {
-      std::string f = it->firstPath + "   ." + it->firstType + (it->compressed ? " (compressed)" : " (not compressed)") + (it->verified ? ", verified" : "")
+      std::string f = it->firstPath + "   " + std::string(it->firstType == "folder" ? "" : ".") + it->firstType + (it->compressed ? " (compressed)" : " (not compressed)") + (it->verified ? ", verified" : "")
                     + (it->size ? "   " + Gb(it->size) : "");
       if (it->files > 1) f += "   +" + std::to_string(it->files - 1) + " more";
       Fact(b, px, y, pw, "On my drives", f, c::kGood);
