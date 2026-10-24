@@ -37,3 +37,5 @@ decrypted/
 
 # BlazingMount app: pictures and PS5 zips are build output
 app/out/
+
+# game art fetched for local previews (never committed)

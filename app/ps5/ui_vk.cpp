@@ -43,6 +43,10 @@ struct Ps5Ui::Impl {
 
   vks::Texture2D atlas{};
   bool atlasMade = false;
+  vks::Texture2D covers{};           // binding 1: the cover atlas (image quads, outline < 0)
+  bool coversMade = false;
+  uint64_t coversVersion = 0;
+  double coversAt = 0;
   vks::Buffer vertices[2];
   VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
   VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -71,6 +75,8 @@ struct Ps5Ui::Impl {
     vertices[1].destroy();
     if (atlasMade) atlas.destroy();
     atlasMade = false;
+    if (coversMade) covers.destroy();
+    coversMade = false;
     pipe = VK_NULL_HANDLE;
     layout = VK_NULL_HANDLE;
     modules.clear();
@@ -110,18 +116,24 @@ struct Ps5Ui::Impl {
       VK_CHECK_RESULT(b.map());
     }
 
+    // binding 1 starts as a 2 x 2 clear image: covers replace it when they arrive (UploadCovers)
+    static const uint8_t clear4[16] = {};
+    covers.fromBuffer(const_cast<uint8_t*>(clear4), sizeof(clear4), VK_FORMAT_R8G8B8A8_UNORM, 2, 2, vd, queue, VK_FILTER_LINEAR);
+    coversMade = true;
     const std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 0)};
+        vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 0),
+        vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1)};
     VkDescriptorSetLayoutCreateInfo layoutCI = vks::initializers::descriptorSetLayoutCreateInfo(bindings);
     VK_CHECK_RESULT(vkCreateDescriptorSetLayout(dev, &layoutCI, nullptr, &setLayout));
-    const std::vector<VkDescriptorPoolSize> sizes = {vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1)};
+    const std::vector<VkDescriptorPoolSize> sizes = {vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2)};
     VkDescriptorPoolCreateInfo poolCI = vks::initializers::descriptorPoolCreateInfo(sizes, 1);
     VK_CHECK_RESULT(vkCreateDescriptorPool(dev, &poolCI, nullptr, &pool));
     VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(pool, &setLayout, 1);
     VK_CHECK_RESULT(vkAllocateDescriptorSets(dev, &allocInfo, &set));
-    const VkWriteDescriptorSet write =
-        vks::initializers::writeDescriptorSet(set, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, &atlas.descriptor);
-    vkUpdateDescriptorSets(dev, 1, &write, 0, nullptr);
+    const VkWriteDescriptorSet writes[2] = {
+        vks::initializers::writeDescriptorSet(set, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, &atlas.descriptor),
+        vks::initializers::writeDescriptorSet(set, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, &covers.descriptor)};
+    vkUpdateDescriptorSets(dev, 2, writes, 0, nullptr);
 
     VkPushConstantRange push = vks::initializers::pushConstantRange(VK_SHADER_STAGE_VERTEX_BIT, 16, 0);
     VkPipelineLayoutCreateInfo plCI = vks::initializers::pipelineLayoutCreateInfo(&setLayout, 1);
@@ -174,7 +186,31 @@ struct Ps5Ui::Impl {
     return true;
   }
 
-  bool Draw(VkCommandBuffer cmd, const Ps5UiTarget& t, const Font& font, const std::vector<Vertex>& vs) {
+  // The cover atlas changed: wait for the GPU (no frame uses the old image any more), make the new one, point binding 1 at it.
+  // A stall of a few ms, at most twice a second, only while covers arrive. A failure keeps the old image (plates show instead).
+  void UploadCovers(const ImageSource& im) {
+    const double now = NowMs();
+    if (!im.rgba || im.version == coversVersion || now - coversAt < 500.0) return;
+    coversAt = now;
+    try {
+      vkDeviceWaitIdle(dev);
+      vks::Texture2D fresh{};
+      fresh.fromBuffer(const_cast<uint8_t*>(im.rgba), size_t(im.width) * im.height * 4, VK_FORMAT_R8G8B8A8_UNORM, im.width, im.height, vd, queue,
+                       VK_FILTER_LINEAR);
+      if (coversMade) covers.destroy();
+      covers = fresh;
+      coversMade = true;
+      const VkWriteDescriptorSet w = vks::initializers::writeDescriptorSet(set, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, &covers.descriptor);
+      vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+      if (coversVersion == 0) say("ui: cover atlas %ux%u uploaded (%.1f ms)", im.width, im.height, NowMs() - now);
+      coversVersion = im.version;
+    } catch (...) {
+      say("ui: cover atlas upload failed - plates instead");
+      coversVersion = im.version;
+    }
+  }
+
+  bool Draw(VkCommandBuffer cmd, const Ps5UiTarget& t, const Font& font, const std::vector<Vertex>& vs, const ImageSource* images) {
     const double started = NowMs();
     if (!tried) {
       tried = true;
@@ -190,6 +226,7 @@ struct Ps5Ui::Impl {
       if (!ok) Destroy();
     }
     if (!ok) return false;
+    if (images) UploadCovers(*images);
     const uint32_t slot = t.frameSlot & 1u;
     size_t n = std::min(vs.size(), kMaxVertices);
     n -= n % 6;
@@ -230,8 +267,9 @@ struct Ps5Ui::Impl {
 Ps5Ui::Ps5Ui() : impl(std::make_unique<Impl>()) {}
 Ps5Ui::~Ps5Ui() = default;
 
-bool Ps5Ui::Draw(VkCommandBuffer cmd, const Ps5UiTarget& target, const Font& font, const std::vector<Vertex>& vertices) {
-  return impl->Draw(cmd, target, font, vertices);
+bool Ps5Ui::Draw(VkCommandBuffer cmd, const Ps5UiTarget& target, const Font& font, const std::vector<Vertex>& vertices,
+                 const ImageSource* images) {
+  return impl->Draw(cmd, target, font, vertices, images);
 }
 
 }  // namespace mf::ui

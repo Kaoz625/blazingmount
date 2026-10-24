@@ -19,6 +19,13 @@ struct VulkanDevice;
 
 namespace mf::ui {
 
+// The cover atlas (BlazingMount app/src/covers.h): RGBA bytes, uploaded again when `version` moves (at most twice a second)
+struct ImageSource {
+  const uint8_t* rgba = nullptr;
+  uint32_t width = 0, height = 0;
+  uint64_t version = 0;
+};
+
 struct Ps5UiTarget {
   vks::VulkanDevice* device = nullptr;
   VkQueue queue = VK_NULL_HANDLE;
@@ -39,7 +46,8 @@ class Ps5Ui {
 
   // Records the batch into `cmd` (inside the render pass, after the look). The first call uploads the atlas and
   // makes the pipeline. false: the UI could not start (logged once) - the program draws its rectangles instead.
-  bool Draw(VkCommandBuffer cmd, const Ps5UiTarget& target, const Font& font, const std::vector<Vertex>& vertices);
+  bool Draw(VkCommandBuffer cmd, const Ps5UiTarget& target, const Font& font, const std::vector<Vertex>& vertices,
+            const ImageSource* images = nullptr);
 
  private:
   struct Impl;

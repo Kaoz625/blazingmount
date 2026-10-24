@@ -31,7 +31,7 @@
 
 class VulkanExample : public VulkanExampleBase
 {
-	static constexpr const char *kVersion = "0.1.1";
+	static constexpr const char *kVersion = "0.2.0";
 	static constexpr int kApiPort = 8094;
 
 	bm::App app;
@@ -339,8 +339,10 @@ private:
 		vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 		batch.Reset(&font, mf::ui::PadStyle::kPlayStation);
 		app.Draw(batch, now());
+		bm::Covers &cv = app.covers();
+		const mf::ui::ImageSource covers{ cv.rgba.data(), bm::Covers::kSize, bm::Covers::kSize, cv.version };
 		ui.Draw(cmd, mf::ui::Ps5UiTarget{ vulkanDevice, queue, renderPass, pipelineCache, swapChain.colorFormat, width, height, currentBuffer },
-			font, batch.vertices);
+			font, batch.vertices, &covers);
 		vkCmdEndRenderPass(cmd);
 		VK_CHECK_RESULT(vkEndCommandBuffer(cmd));
 	}

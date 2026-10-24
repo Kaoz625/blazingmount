@@ -92,11 +92,36 @@ inline void RasterSlant(const Font& font, const Vertex* q, Image& img, float sx,
 
 // Draws the batch's quads (6 vertices each, axis-aligned, as draw.h makes them) over the image, scaled from the
 // 1080p layout to the image's size.
-inline void Raster(const Font& font, const std::vector<Vertex>& vs, Image& img) {
+// The cover atlas the image quads sample (BlazingMount: app/src/covers.h); RGBA bytes, sRGB, straight alpha.
+struct ImageAtlas {
+  const uint8_t* rgba = nullptr;
+  int width = 0, height = 0;
+};
+
+inline void RasterImage(const Vertex& a, const Vertex& c, const ImageAtlas& at, Image& img, float sx, float sy) {
+  const float x0 = a.x * sx, y0 = a.y * sy, x1 = c.x * sx, y1 = c.y * sy;
+  const int px0 = std::max(0, int(std::floor(x0))), px1 = std::min(img.width, int(std::ceil(x1)));
+  const int py0 = std::max(0, int(std::floor(y0))), py1 = std::min(img.height, int(std::ceil(y1)));
+  for (int y = py0; y < py1; ++y)
+    for (int x = px0; x < px1; ++x) {
+      const float u = a.u + (x + 0.5f - x0) / (x1 - x0) * (c.u - a.u), v = a.v + (y + 0.5f - y0) / (y1 - y0) * (c.v - a.v);
+      const int tx = std::clamp(int(u * at.width), 0, at.width - 1), ty = std::clamp(int(v * at.height), 0, at.height - 1);
+      const uint8_t* t = at.rgba + (size_t(ty) * at.width + tx) * 4;
+      const float al = t[3] / 255.0f * (a.fill.a / 255.0f);
+      float* p = &img.rgb[(size_t(y) * img.width + x) * 3];
+      for (int i = 0; i < 3; ++i) p[i] = t[i] / 255.0f * al + p[i] * (1 - al);
+    }
+}
+
+inline void Raster(const Font& font, const std::vector<Vertex>& vs, Image& img, const ImageAtlas* images = nullptr) {
   const float sx = img.width / kScreenW, sy = img.height / kScreenH;
   for (size_t q = 0; q + 5 < vs.size(); q += 6) {
     const Vertex& a = vs[q];
     const Vertex& c = vs[q + 2];
+    if (a.outline < 0) {   // an image quad (Batch::Image)
+      if (images && images->rgba) RasterImage(a, c, *images, img, sx, sy);
+      continue;
+    }
     if (a.x != vs[q + 5].x) {   // a slanted solid quad (Batch::Slant): its top-left is not above its bottom-left
       RasterSlant(font, vs.data() + q, img, sx, sy);
       continue;

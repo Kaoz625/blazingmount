@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "covers.h"
 #include "json.h"
 #include "ui/draw.h"
 
@@ -166,6 +167,9 @@ class App {
       if (!ok) return;
       log_.clear();
       for (const auto& l : v["lines"].items) log_.push_back(l.str());
+    } else if (path.rfind("/api/icon/", 0) == 0) {
+      const std::string tid = path.substr(10);
+      if (code == 200 && !body.empty()) covers_.Put(tid, body); else covers_.Failed(tid);
     } else if (Base(path) == "/api/action") {
       if (!ok) Toast(code == 0 ? "BlazingMount did not answer" : "Refused: " + v["error"].str());
       nextStatus_ = 0;   // see the result soon
@@ -196,6 +200,18 @@ class App {
       Ask("GET", "/api/library"); nextLibrary_ = now + 0.5;
     }
     if (connected_ && tab_ == Tab::kSettings && settingsGen_ != gen_ && !Inflight("/api/settings")) Ask("GET", "/api/settings");
+    if (connected_ && tab_ == Tab::kLibrary) {   // covers for the rows on screen and the focused game, two at a time
+      int busy = 0;
+      for (const auto& f : inflight_) busy += f.rfind("/api/icon/", 0) == 0;
+      for (int i = top_ - 2; i < top_ + kRowsVisible + 4 && busy < 2; ++i) {
+        if (i < 0 || i >= int(view_.size())) continue;
+        const std::string& tid = games_[size_t(view_[size_t(i)])].tid;
+        const std::string p = "/api/icon/" + tid;
+        if (covers_.Known(tid) || Inflight(p)) continue;
+        Ask("GET", p);
+        ++busy;
+      }
+    }
     if (connected_ && tab_ == Tab::kActivity && now >= nextLog_ && !Inflight("/api/log")) { Ask("GET", "/api/log?lines=80"); nextLog_ = now + 2.0; }
   }
   std::vector<Request> TakeRequests() { std::vector<Request> r; r.swap(out_); return r; }
@@ -222,9 +238,11 @@ class App {
   bool connected() const { return connected_; }
   void SetFilter(Filter f) { filter_ = f; Rebuild(""); }
   bool confirming() const { return confirm_.active; }
+  Covers& covers() { return covers_; }
 
  private:
   // ---------------------------------------------------------------- state
+  Covers covers_;
   std::vector<Game> games_;
   std::vector<int> view_;        // games_ indices after filter + sort
   std::vector<Setting> settings_;
@@ -511,8 +529,12 @@ class App {
       const float y0 = kListTop + i * (kRowH + kRowGap), y1 = y0 + kRowH;
       if (f) Round(b, kGutter, y0, listR, y1, 16, c::kFocusFill);
       // the plate (cover art comes in v0.2: docs/UI-DESIGN.md)
-      Round(b, kGutter + 12, y0 + 12, kGutter + 84, y1 - 12, 12, f ? Hex(0x9E2830) : c::kSurfaceHi);
-      b.Text(kGutter + 48, b.TopForCentre((y0 + y1) / 2, kMeta), Initials(g.title).c_str(), St(kMeta, f ? c::kTextHi : c::kTextDim), Align::kCentre);
+      float uv[4];
+      if (covers_.Uv(g.tid, uv)) b.Image(kGutter + 12, y0 + 10, kGutter + 80, y1 - 10, uv, f ? 1.0f : 0.65f);   // DESIGN-V2 2.6 artwork opacity
+      else {
+        Round(b, kGutter + 12, y0 + 10, kGutter + 80, y1 - 10, 12, f ? Hex(0x9E2830) : c::kSurfaceHi);
+        b.Text(kGutter + 46, b.TopForCentre((y0 + y1) / 2, kMeta), Initials(g.title).c_str(), St(kMeta, f ? c::kTextHi : c::kTextDim), Align::kCentre);
+      }
       const Rgba under = f ? c::kFocusFill : c::kBg;
       const Badge bd = BadgeOf(g);
       float pl = Pill(b, listR - 16, (y0 + y1) / 2, bd.text, f && bd.tone != 3 ? 0 : bd.tone, under);
@@ -547,8 +569,12 @@ class App {
     Round(b, x0, y0, x1, y1, 16, c::kSurface);
     const float px = x0 + 32, pw = x1 - x0 - 64;
     // header: plate + title
-    Round(b, px, y0 + 32, px + 136, y0 + 168, 16, c::kSurfaceHi);
-    b.Text(px + 68, b.TopForCentre(y0 + 100, kHead), Initials(g->title).c_str(), St(kHead, c::kTextDim), Align::kCentre);
+    float uv[4];
+    if (covers_.Uv(g->tid, uv)) b.Image(px, y0 + 32, px + 136, y0 + 168, uv);
+    else {
+      Round(b, px, y0 + 32, px + 136, y0 + 168, 16, c::kSurfaceHi);
+      b.Text(px + 68, b.TopForCentre(y0 + 100, kHead), Initials(g->title).c_str(), St(kHead, c::kTextDim), Align::kCentre);
+    }
     float ty = Wrap(b, px + 160, y0 + 36, pw - 160, g->title, St(kHead - 4, c::kTextHi), 2, 50);
     const Badge bd = BadgeOf(*g);
     Pill(b, px + 160 + b.Width(bd.text, St(kMeta - 2, c::kText)) + 28, std::max(ty + 26, y0 + 140), bd.text, bd.tone, c::kSurface);

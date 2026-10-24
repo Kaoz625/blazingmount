@@ -8,6 +8,7 @@
 // Each shot walks the app with the presses a person would make, so a picture is also a check that the path to it works.
 // It also checks the rules every frame: no text under 20 px, nothing past the right gutter, no unknown {TOKENS}.
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -41,6 +42,12 @@ struct Rig {
         std::string file = base == "/api/status" ? "status.json" : base == "/api/library" ? "library.json" : base == "/api/settings" ? "settings.json"
                          : base == "/api/log" ? "log.json" : "";
         if (offline) { app.OnResponse(r.path, 0, ""); continue; }
+        if (r.path.rfind("/api/icon/", 0) == 0) {   // covers: BM_ICONS=<dir of TID.png> (never committed: game art)
+          const char* d = std::getenv("BM_ICONS");
+          std::string png = d ? Read(std::string(d) + "/" + r.path.substr(10) + ".png") : "";
+          app.OnResponse(r.path, png.empty() ? 404 : 200, png);
+          continue;
+        }
         if (r.method == "POST") { app.OnResponse(r.path, 200, "{\"ok\":true}"); continue; }
         std::string body = file.empty() ? "" : Read(dir + "/" + file);
         app.OnResponse(r.path, body.empty() ? 404 : 200, body);
@@ -48,7 +55,7 @@ struct Rig {
     }
   }
   void Press(bm::Button b) { app.Press(b); t += 0.2; Pump(); }
-  void Wait(double s) { t += s; Pump(); }
+  void Wait(double s) { t += s; Pump(); for (int i = 0; i < 30; ++i) { t += 0.05; Pump(); } }   // covers trickle in two at a time
 };
 
 int Shot(const mf::ui::Font& font, Rig& rig, const std::string& out) {
@@ -61,7 +68,8 @@ int Shot(const mf::ui::Font& font, Rig& rig, const std::string& out) {
   img.width = 1920;
   img.height = 1080;
   img.Fill(bm::c::kBg);
-  mf::ui::Raster(font, batch.vertices, img);
+  mf::ui::ImageAtlas covers{rig.app.covers().rgba.data(), bm::Covers::kSize, bm::Covers::kSize};
+  mf::ui::Raster(font, batch.vertices, img, &covers);
   int bad = 0;
   if (batch.minTextSize < 20) { std::printf("  FAIL %s: text at %.0f px (< 20)\n", out.c_str(), batch.minTextSize); ++bad; }
   if (batch.maxTextRight > 1830.5f) { std::printf("  FAIL %s: text reaches x=%.0f (> 1830)\n", out.c_str(), batch.maxTextRight); ++bad; }

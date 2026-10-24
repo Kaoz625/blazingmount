@@ -16,7 +16,7 @@ SSH="ssh -o BatchMode=yes -o ServerAliveInterval=30 dell"
 quiet() { grep -v 'post-quantum\|store now\|pq.html' || true; }
 wsl() { $SSH "wsl -d Blazing -- bash -lc \"$1\""; }
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -cf - ps5/blazingmount.cpp ps5/ui_vk.h ps5/ui_vk.cpp ps5/shaders ps5/build-on-dell-wsl.sh \
-    src assets | base64 | wsl "rm -rf $B/bm-src && mkdir -p $B/bm-src && base64 -d | tar -C $B/bm-src -xf -" 2>&1 | quiet
+    src assets third_party/stb/stb_image.h third_party/stb/LICENSE | base64 | wsl "rm -rf $B/bm-src && mkdir -p $B/bm-src && base64 -d | tar -C $B/bm-src -xf -" 2>&1 | quiet
 out=$(mktemp)
 wsl "set -o pipefail; BM_APP_VERSION=$VERSION bash $B/bm-src/ps5/build-on-dell-wsl.sh 2>&1 | tee -a $B/logs/bm-run.log && echo BM_BUILD_OK || echo BM_BUILD_FAILED" 2>&1 | quiet | tee "$out"
 ok=$(grep -c '^BM_BUILD_OK' "$out" || true)

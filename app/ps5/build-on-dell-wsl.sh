@@ -47,7 +47,7 @@ mirror() {
     (cd "$dst" && find . -type f) | while read -r f; do [[ -f $src/$f ]] || rm -f "$dst/$f"; done
 }
 for f in ps5/blazingmount.cpp ps5/ui_vk.h ps5/ui_vk.cpp ps5/shaders/ui.vert ps5/shaders/ui.frag src/bm_app.h src/json.h src/ui/draw.h \
-         src/ui/font.h assets/ui/bm-font.sdf assets/ui/Barlow-OFL.txt; do
+         src/ui/font.h src/covers.h third_party/stb/stb_image.h assets/ui/bm-font.sdf assets/ui/Barlow-OFL.txt; do
     [[ -f $S/$f ]] || fail "missing $S/$f (dell-build.sh copies app/ there)"
 done
 put "$S/ps5/blazingmount.cpp" "$T/examples/$PID/$PID.cpp"
@@ -55,8 +55,16 @@ put "$S/ps5/ui_vk.h" "$T/examples/$PID/ui_vk.h"
 put "$S/ps5/ui_vk.cpp" "$T/examples/$PID/ui_vk.cpp"
 # the program's and ui_vk's "../src/..." resolve from examples/<pid>/ to examples/src/
 mirror "$S/src" "$T/examples/src"
+mirror "$S/third_party" "$T/examples/third_party"   # covers.h's ../third_party/stb/stb_image.h (public domain / MIT)
 # the template compiles the program inside a namespace (ps5/src/wrap.cpp.in): every header it needs is included first, at file scope
-if ! grep -q 'BlazingMount app' "$T/ps5/src/prelude.h"; then
+if ! grep -q 'BM_STB_EXTERNAL' "$T/ps5/src/prelude.h"; then
+    # an older block (without BM_STB_EXTERNAL) is cut first
+    python3 - "$T/ps5/src/prelude.h" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+i = s.find('\n// BlazingMount app:')
+if i >= 0: open(p, 'w').write(s[:i] + '\n')
+PY
     cat >> "$T/ps5/src/prelude.h" <<'EOF'
 
 // BlazingMount app: the system headers, the app core and the UI pass at file scope, before the program is included
@@ -71,6 +79,7 @@ if ! grep -q 'BlazingMount app' "$T/ps5/src/prelude.h"; then
 #include <mutex>
 #include <thread>
 #include "platform.h"
+#define BM_STB_EXTERNAL 1   // stb_image is already in the template (tinygltf)
 #include "../../examples/src/bm_app.h"
 #include "../../examples/blazingmount/ui_vk.h"
 EOF

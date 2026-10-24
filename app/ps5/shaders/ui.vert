@@ -28,5 +28,6 @@ void main() {
     outFill.rgb = toLinear(inFill.rgb);
     outLine.rgb = toLinear(inLine.rgb);
   }
+  if (inParams.y < 0.0) outParams.x = push.p.x;   // an image quad (BlazingMount covers): x tells the fragment the target is sRGB
   gl_Position = vec4(inPos.x / 960.0 - 1.0, inPos.y / 540.0 - 1.0, 0.0, 1.0);
 }

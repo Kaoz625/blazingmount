@@ -98,6 +98,14 @@ class Batch {
     if (x1 <= x0 || y1 <= y0 || c.a == 0) return;
     Quad(x0, y0, x1, y1, solidU_, solidV_, solidU_, solidV_, c, Rgba{0, 0, 0, 0}, 0, 0);
   }
+  // An image from the cover atlas (BlazingMount: app/src/covers.h): outline < 0 marks the quad, so the shaders sample the
+  // RGBA cover atlas at (u, v) instead of the font; `alpha` dims it over what is under it.
+  void Image(float x0, float y0, float x1, float y1, const float uv[4], float alpha = 1.0f) {
+    if (x1 <= x0 || y1 <= y0 || alpha <= 0) return;
+    Quad(x0, y0, x1, y1, uv[0], uv[1], uv[2], uv[3], Rgba{255, 255, 255, uint8_t(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f)},
+         Rgba{0, 0, 0, 0}, 0, -1.0f);
+  }
+
   // A frame `w` pixels thick inside the rectangle.
   void Frame(float x0, float y0, float x1, float y1, float w, Rgba c) {
     Rect(x0, y0, x1, y0 + w, c);
