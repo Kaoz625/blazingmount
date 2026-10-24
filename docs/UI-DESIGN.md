@@ -1,6 +1,6 @@
 # BlazingMount app: the native screens for the payload
 
-Status: 24 Oct 2026, v0.1.0 (MVP). Markus asked for:
+Status: 24 Oct 2026, v0.3.0 (whole library + covers). Markus asked for:
 
 > "we need to make visible screens for the payload like some of the other payloads have. i want it to be native. the mounter
 > should show our full library and i should also be able to choose what i want and what i dont want. this will be a good way
@@ -162,6 +162,76 @@ A full-screen note: "BlazingMount is not running", what to do (load blazingmount
 **Pictures:** run `app/host/preview.sh`. It draws every screen from real API answers in `app/fixtures/` and checks the rules
 on each one: text ≥ 20 px, nothing past x = 1830, no unknown button tokens, and within the PS5 pass's vertex budget.
 
+## 3.5 The whole library: everything he owns, every system (v0.3, Markus 24 Oct)
+
+> "If i had a moment one day where i wanted to play a game i hadnt played in 30 years... i could."
+
+The Library is not only the drives. `host/library/library.py` runs on mac1 and joins three sources into `~/.blazing/library/library.json`:
+- **his owned list**: blazing-ps5 `docs/D5-WHAT-MARKUS-HAD.md`, the PSN library plus the Xbox, PC, Nintendo, Sega and retro sections he added on 15 Oct
+- **both game drives**: the PS5/PS4/PS3/PS2/Switch/Xbox folders and `Retro Games/<System>`, with each file's type, whether it is compressed, and whether it is verified (`.verified.json`)
+- **imgserve**: which PS5 images stream now (their keys)
+
+On 24 Oct that came to **18,809 games on 56 systems**: 679 on the drives, 43 streamable now, 5.1 MB of JSON.
+
+One entry is one game on one system. Regional and edition variants are grouped by a normalised title: region and language tags, "Rev 1", ".nkit" and "Title, The" are folded away.
+
+| Field | Meaning |
+|---|---|
+| `how` | owned / ps_plus / licence / free / package / on_drive |
+| `files[]` | path, drive, type, compressed, verified, size |
+| `stream` | imgserve key + title id (BlazingMount can build its starter) |
+| `plays` | the console or emulator that plays it. Examples: "PS5: streams with BlazingMount", "PS5: PS5SX2", "PS5: BlazingArch (Dolphin)", "Cemu (Dell)", "xemu (Dell)", "PS5: Eden; iPhone: nxnative" |
+| `id` | a stable 12-hex id (system + normalised title): the cover's name |
+
+**In the app:**
+- `L2`/`R2` walk the systems, each with its count: All, PS5, PS4, PS3, PS2, PS1/PSP/Vita, Switch, Nintendo, Xbox, PC, Sega, Retro, Mobile.
+- `OPTIONS` chooses what to show:
+  - everything I own
+  - playable now
+  - on my drives
+  - on this console
+  - not on my drives
+  - needs attention
+  - hidden
+- `TOUCH PAD` switches between the cover grid (5 × 3, DESIGN-V2 focus: a 6 px accent halo and bar; artwork at 1.00 when focused, 0.65 in the focused row, 0.45 elsewhere) and the list.
+
+The detail panel says:
+- which system, and the title ids
+- whether it is his: owned, PS Plus, or licence
+- where it is on his drives: path, type, compressed or not, verified or not, size
+- what plays it
+
+PS5 games keep the console facts and the Install / Remove / Rebuild / Hide buttons. For other systems the buttons say what plays the game (launching an emulator from the app is a next step).
+
+### Covers: built for thousands of titles
+
+1. **Fetched once on mac1** (`library.py covers`). The source order is:
+   - the game's own `icon0.png` (images through imgserve, folders on the drives)
+   - **libretro-thumbnails** Named_Boxarts (exact Redump/No-Intro names, then a normalised match; covers PS1/PS2/PS3/PS4/PSP/Vita/Xbox/360/Wii U/Wii/GC/DS/3DS/every retro system)
+   - **IGDB** (`/games` search with the Twitch app token in `api-keys.env`, 4 requests a second, best of 6 by exact name, then platform)
+
+   Every result, hit or miss, is in `~/.blazing/covers/state.jsonl`, so nothing is asked twice. Every source URL and IGDB's matched name are in `sources.tsv`; the source sites are in LINKS.md. The first run is resumable and takes about 3 h, in a visible Terminal (`covers-run.command`).
+2. **Small first.** Each cover is stored as:
+   - `full/<id>.jpg` (≤ 1024 px)
+   - `thumb/<id>.jpg` (fit in 256 px)
+   - an average **colour** used as the placeholder
+
+   All are JPEG q85 on the app's black, about 80 KB a title, roughly 1.5 GB for everything (PNG would have been about 10 GB).
+3. **Sprite sheets:** `sheet/<n>.jpg`, 64 covers of 128 px each in library order, about 50 KB a sheet. `covers.json` gives each id its page, cell and colour. A page of the grid is one request.
+4. **Served from imgserve** (blazing-fighters 8ffc032, read-only routes):
+   - `/library.json`, with an ETag and 304 when unchanged
+   - `/covers.json`
+   - `/covers/{thumb,full,sheet}/<id>.jpg`, `Cache-Control: immutable`, a year
+   - `/proven.tsv`
+
+   Until the live :4451 is restarted with them, `library.py serve` serves the same routes on :4453.
+5. **The console** fetches nothing on its own. blazingmountd passes `/api/catalog`, `/api/covers.json` and `/api/cover/...` through, over the LAN or the tsnet proxy away from home, and keeps nothing on disk. The app:
+   - loads only the sheets of the rows on screen plus one row ahead, two requests at a time
+   - keeps covers in a **fixed 16 MB RAM atlas**: 240 slots of 128 px, the least recently drawn slot is reused, no disk cache that grows (the BlazingMount rule)
+   - shows the **full cover only for the focused game**, after 0.35 s, in a reserved 512 px corner of that atlas
+   - paints each cover's colour until its sheet lands, so the grid is never empty
+6. **It follows the drives by itself.** `library.py watch` (`watch.command`, visible) checks a cheap signature every 5 minutes: the owned list's mtime, every game folder's names and mtimes, and imgserve's `/games.txt`. When it moves, it re-indexes, fetches covers for the new titles only, and remakes the sheets. imgserve then hands out the new ETag, blazingmountd notices within 30 s (`/api/status` `catalog_etag`), and the app reloads.
+
 ## 4. Choose what you want
 
 "What I want and what I don't" is a small file the app writes through the payload, `/data/blazing/choices.tsv`:
@@ -208,6 +278,7 @@ HTTP/1.0, one request per connection, JSON out, `Access-Control-Allow-Origin: *`
 | `GET /api/log?lines=N` | `lines[]`: the log's tail (N ≤ 2000) |
 | `GET /api/icon/<TID>` | icon0.png: the local starter's, else a cached copy, else fetched once from the host (`/t/<key>/sce_sys/icon0.png`) into `/data/blazing/icons/` |
 | `POST /api/action?do=…&tid=…` | `install`, `remove`, `rebuild`, `hide`, `unhide`, `sync`, `auto&value=0/1`, `set&key=K&value=V`. **Needs the header `X-BM-Request: 1`**: a web page on another site cannot send it, so there are no cross-site writes. Unknown actions, keys, title ids and newline values are refused. |
+| `GET /api/catalog`, `/api/covers.json`, `/api/cover/<thumb|full|sheet>/<id>.jpg` | the host's whole library and its covers, passed through (names checked; nothing kept on the console); `/api/status` has `catalog_etag` |
 | `GET /` | a small status page for a phone or the PS5 browser |
 
 **Threads.**
@@ -248,20 +319,19 @@ app ships the way pldmgr and Orbit ship their tiles.
 
 | Button | Library | Activity | Settings | Confirm |
 |---|---|---|---|---|
-| ↑ ↓ (stick too, repeat after 0.4 s) | move | scroll the log | move | |
-| ← → | page up / down | | change a number | |
+| ↑ ↓ ← → (stick too, repeat after 0.4 s) | move in the grid (list: ← → page) | scroll the log | move / change a number | |
 | CROSS | Install / Remove | check the drives now | toggle / save | yes |
 | TRIANGLE | Rebuild | | | |
 | SQUARE | Hide / Show | | | |
 | CIRCLE | quit the app | | undo an edit | cancel |
 | L1 / R1 | tabs | tabs | tabs | |
-| L2 / R2 | filter | | | |
-| OPTIONS | sort | | | |
+| L2 / R2 | system (All, PS5 … Retro, Mobile) | | | |
+| OPTIONS | what to show | | | |
+| TOUCH PAD | cover grid / list | | | |
 
 ## 10. What we should add (next versions, in order)
 
-1. **Cover art.** A second texture in the UI pass: a 2048² RGBA atlas of 128 px covers decoded with stb_image, fed by
-   `/api/icon`. Then a **cover grid** view (Itemzflow, PS5SX2) as a toggle next to the list.
+1. ~~Cover art and a cover grid~~: done in v0.2 / v0.3 (section 3.5). Next for covers: deploy the imgserve routes, then fix wrong IGDB matches by hand from `sources.tsv`.
 2. **The tile inside the payload** (section 8).
 3. **Build progress.** Files and bytes done for the game being built (the payload logs every 5000 files; expose counters
    in `busy`), plus a queue view with what is next.
@@ -278,6 +348,8 @@ app ships the way pldmgr and Orbit ship their tiles.
 |---|---|
 | `console/blazingmountd/src/bm_api.c` | the API (section 6) |
 | `host/api_hooks.py`, `host/test_api.py` | the wiring and its test |
+| `host/library/library.py` | the whole library + covers (mac1): index, covers, sheets, serve, watch, stats |
+| `app/src/covers.h` | the fixed 16 MB cover atlas (sheets, focus cover, icon0) |
 | `app/src/bm_app.h` | the app: screens, controller, polling (pure C++) |
 | `app/src/json.h` | the JSON reader |
 | `app/src/ui/{draw,font,raster}.h` | MF's quad batch, SDF font and software raster (blazing-fighters f68b025) |

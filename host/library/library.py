@@ -7,6 +7,10 @@
     python3 library.py sheets                                                  -> ~/.blazing/covers/sheet/<n>.png (64 covers a page) + covers.json
     python3 library.py serve   [--port 4453]                                   -> GET /library.json (ETag), /covers/{thumb,full,sheet}/<id>.jpg
     python3 library.py stats
+    python3 library.py watch   [--every 300]                                     the library follows the drives and the owned list by itself:
+                               a cheap signature (owned list mtime, every game folder's names+mtimes, imgserve /games.txt) every 5 min;
+                               when it moves: index, covers (new titles only: the rest are settled), sheets. imgserve serves the new
+                               /library.json at once (new ETag), blazingmountd sees the ETag move, the app reloads.
 
 Markus, 24 Oct 2026: "If i had a moment one day where i wanted to play a game i hadnt played in 30 years... i could." The library is
 not only the drives: it is everything he owns (his owned list, blazing-ps5 docs/D5-WHAT-MARKUS-HAD.md: PSN library + the Xbox/PC/
@@ -489,6 +493,37 @@ def cmd_serve(a):
     print("library: http://0.0.0.0:%d/library.json  /covers.json  /covers/{thumb,full,sheet}/<id>.jpg" % a.port, flush=True)
     srv.serve_forever()
 
+# ---------------------------------------------------------------- watch: the library follows the drives and the owned list by itself
+def signature(owned):
+    """cheap: the owned list's mtime, every game folder's listing (names + mtimes, one level), imgserve's /games.txt"""
+    h = hashlib.sha256()
+    try: h.update(str(os.path.getmtime(owned)).encode())
+    except OSError: pass
+    for drive in DRIVES:
+        for rel, _ in DRIVE_DIRS + [("Retro Games", "")]:
+            d = os.path.join(drive, rel)
+            if not os.path.isdir(d): continue
+            for name in sorted(os.listdir(d)):
+                p = os.path.join(d, name)
+                try: h.update(("%s|%d\n" % (p, int(os.path.getmtime(p)))).encode())
+                except OSError: pass
+    try:
+        with urllib.request.urlopen(IMGSERVE + "/games.txt", timeout=15) as r: h.update(r.read())
+    except Exception: pass
+    return h.hexdigest()
+
+def cmd_watch(a):
+    last = None
+    while True:
+        sig = signature(a.owned)
+        if sig != last:
+            if last is not None: print("%s: the drives or the owned list changed: index, new covers, sheets" % time.strftime("%H:%M:%S"), flush=True)
+            a.fast = False; cmd_index(a)
+            a.only, a.limit = None, 0; cmd_covers(a)
+            cmd_sheets(a)
+            last = sig
+        time.sleep(a.every)
+
 def cmd_stats(a):
     lib = json.load(open(os.path.join(LIB, "library.json")))
     print("%d games, made %s; covers: %s" % (lib["count"], lib["made"], stats_line()))
@@ -499,9 +534,10 @@ def main():
     p = sp.add_parser("index"); p.add_argument("--owned", default=os.path.join(LIB, "D5-WHAT-MARKUS-HAD.md")); p.add_argument("--fast", action="store_true")
     p = sp.add_parser("covers"); p.add_argument("--only"); p.add_argument("--limit", type=int, default=0)
     sp.add_parser("sheets"); sp.add_parser("stats")
+    p = sp.add_parser("watch"); p.add_argument("--owned", default=os.path.join(LIB, "D5-WHAT-MARKUS-HAD.md")); p.add_argument("--every", type=int, default=300)
     p = sp.add_parser("serve"); p.add_argument("--port", type=int, default=4453)
     a = ap.parse_args()
-    dict(index=cmd_index, covers=cmd_covers, sheets=cmd_sheets, serve=cmd_serve, stats=cmd_stats)[a.cmd](a)
+    dict(index=cmd_index, covers=cmd_covers, sheets=cmd_sheets, serve=cmd_serve, stats=cmd_stats, watch=cmd_watch)[a.cmd](a)
 
 if __name__ == "__main__":
     main()
