@@ -32,3 +32,20 @@ Blockers: on-TV visual proof needs Markus's reboot (RP menu capture is blocked);
 - tests: host/test_catalog_merge.py (8), host/test_starter_checks.py (10); `python3 -I host/test_*.py`.
 - KNOWN GAP in this public repo: host/engine lacks mkbackport.py (mkgame.elf_needs imports it) and decrypt_fself comes from outside, so the starter only runs on mac1 with `SMBLINK_TOOLS=~/.blazing/smblink/tools` (what blazing-ps5 tools/add-from-drives.py sets). Fixing that for other devs = vendor an ELF dynamic-section reader and review decrypt_fself's licence first.
 - The house-only site button + worker that USE these live in blazing-games / blazing (add-on) / blazing-ps5 tools/add-from-drives.py; see roku channels .claude/handoff.md "add-from-drives" and memory add-from-my-drives-button.
+
+---
+## blazingmount-ui-agent (24 Oct 2026 ~10:20) - the native BlazingMount app
+Working on: native PS5 screens for the payload (Markus 24 Oct) - app PPSA99280 + blazingmountd local API :8094.
+Last action: app v0.1.1 built on the Dell (zip sha d59c0764, app/out/ps5/, gitignored), pushed 23c5ec7; design doc docs/UI-DESIGN.md (e82b2a9).
+Done + tested: bm_api.c (host/test_api.py 38/38 ALL PASS), app screens (app/host/preview.sh ALL SHOTS OK, PNGs in app/out/preview),
+  payload with the 5 hooks cross-compiles for PS5 (mac2 ~/NYCT/bm-ui-build, NOT installed).
+NOT done: hooks are NOT in blazingmountd.c yet (posted to hub, applying at 11:00 unless payload-agent objects);
+  nothing installed on any console; DIGI5 held by digi5-test-agent.
+Next step (exact):
+  1. python3 -I host/api_hooks.py console/blazingmountd/src/blazingmountd.c && python3 -I host/test_api.py && commit + push
+  2. when DIGI5 is free: ps5-claim DIGI5 blazingmount-ui-agent "app MVP test"; ps5 notice DIGI5 "..."; swap the slot ELF
+     (keep v2.5 .bak), stop old daemon by /data/blazing/blazingmountd.pid, load once via POST :8084/loadpayload:<slot elf>;
+     curl http://192.168.1.39:8094/api/status; put-tree.py DIGI5 <unzipped>/PPSA99280 /data/homebrew/PPSA99280 --stage --tid PPSA99280;
+     play.py up --console DIGI5 --backend chiaki; open the tile with Cross; shots; CIRCLE quits; play.py down; ps5-release DIGI5.
+Key files: docs/UI-DESIGN.md, console/blazingmountd/src/bm_api.c, host/api_hooks.py, host/test_api.py, app/src/bm_app.h, app/ps5/*.
+Blockers: DIGI5 claim (digi5-test-agent); hooks wait for 11:00 hub ack window.
