@@ -31,7 +31,7 @@
 
 class VulkanExample : public VulkanExampleBase
 {
-	static constexpr const char *kVersion = "0.3.1";
+	static constexpr const char *kVersion = "0.4.0";
 	static constexpr int kApiPort = 8094;
 
 	bm::App app;
@@ -259,8 +259,8 @@ public:
 private:
 	void press(bm::Button b)
 	{
-		if (b == bm::kCircle && app.tab() == bm::Tab::kLibrary && !app.confirming()) {
-			say("CIRCLE on the Library: quit");
+		if (b == bm::kCircle && (app.tab() == bm::Tab::kLibrary || app.tab() == bm::Tab::kDiscover) && !app.confirming()) {
+			say("CIRCLE on the Library or Discover: quit");
 			quit = true;
 			return;
 		}

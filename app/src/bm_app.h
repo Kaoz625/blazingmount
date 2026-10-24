@@ -61,7 +61,7 @@ struct Setting {
   std::string key, type, value, help, edit;   // edit: the value being changed with Left/Right (empty = none)
 };
 
-enum class Tab { kLibrary, kActivity, kSettings };
+enum class Tab { kLibrary, kDiscover, kActivity, kSettings };
 enum class Filter { kAll, kOnConsole, kNotInstalled, kProblems, kHidden, kPs5, kPs4, kCount };   // (kept for the preview's old shots)
 
 // The whole library (Markus 24 Oct: everything he owns, every system): L2/R2 walk the systems, OPTIONS what to show, TOUCH PAD grid/list
@@ -101,6 +101,11 @@ struct Item {
   Rgba colour{23, 16, 18, 255};
   int page = -1, cell = -1; // where its cover is in the sprite sheets (-1: no cover)
   std::string coverKey;     // the atlas key: the catalog id, or the title id (icon0) without a catalog
+  // DISCOVER (docs/UI-DESIGN.md 10.5): a game from the host's /discover.json (how = owned/ps_plus/... or "" = not owned, files = on my drives)
+  std::string dateText, summary, sysLabels;
+  std::vector<std::string> syss;
+  long long date = 0;
+  int hype = 0, rating = 0, votes = 0;
 };
 
 inline std::string Gb(long long bytes) {
@@ -170,6 +175,8 @@ class App {
       status_ = v;
       gen_ = (unsigned long)v["gen"].ll();
       if (v["catalog_etag"].str() != statusCatalogEtag_) statusCatalogEtag_ = v["catalog_etag"].str();
+      statusDiscoverEtag_ = v["discover_etag"].str();
+      wall_ = v["now"].ll();
       const json::Value& rec = v["recent"];
       if (rec.size()) {
         const std::string last = rec[rec.size() - 1].str();
@@ -223,6 +230,35 @@ class App {
       auto it = sheetCells_.find(page);
       if (code == 200 && it != sheetCells_.end()) covers_.PutSheet(it->second, body);
       else if (it != sheetCells_.end()) for (auto& c2 : it->second) covers_.Failed(c2.first);
+    } else if (path.rfind("/api/cover/dsheet/", 0) == 0) {
+      const int page = std::atoi(path.c_str() + 18);
+      auto it = dsheetCells_.find(page);
+      if (code == 200 && it != dsheetCells_.end()) covers_.PutSheet(it->second, body);
+      else if (it != dsheetCells_.end()) for (auto& c2 : it->second) covers_.Failed(c2.first);
+    } else if (Base(path) == "/api/discover") {
+      discoverTried_ = true;
+      if (!ok) { discoverMissing_ = code == 404; return; }
+      discoverMissing_ = false;
+      discover_ = std::move(v);
+      discoverEtag_ = statusDiscoverEtag_;
+      RebuildDiscover();
+    } else if (Base(path) == "/api/wishlist") {
+      if (!ok) return;
+      wishOrder_.clear(); wished_.clear();
+      for (const auto& w : v["items"].items) { wishOrder_.push_back(w["id"].str()); wished_[w["id"].str()] = true; }
+      for (auto& kv : wishPending_) wished_[kv.first] = kv.second;      // a press still on its way wins over an older list
+      wishTried_ = true;
+      RebuildDView(FocusedD() ? FocusedD()->id : "");
+    } else if (path.rfind("/api/action?do=wish", 0) == 0) {
+      const std::string id = QueryArg(path, "id");
+      const bool on = QueryArg(path, "value") == "1";
+      wishPending_.erase(id);
+      if (!ok || !v["ok"].truthy()) {                                   // mac1 did not take it: the card goes back
+        wished_[id] = !on;
+        Toast(code == 0 ? "BlazingMount did not answer: the wishlist did not change" : "Wishlist not changed: " + v["error"].str());
+      }
+      nextWish_ = 0;
+      RebuildDView(FocusedD() ? FocusedD()->id : "");
     } else if (path.rfind("/api/cover/full/", 0) == 0) {
       const std::string id = path.substr(16, path.size() - 16 - 4);
       if (code == 200) covers_.PutFocus(id, body);
@@ -241,13 +277,14 @@ class App {
   void Press(Button b) {
     if (confirm_.active) { PressConfirm(b); return; }
     if (b == kL1 || b == kR1) {
-      int t = (int(tab_) + (b == kR1 ? 1 : 2)) % 3;
+      int t = (int(tab_) + (b == kR1 ? 1 : 3)) % 4;
       tab_ = Tab(t);
       if (tab_ == Tab::kSettings) settingsGen_ = 0;
       return;
     }
     switch (tab_) {
       case Tab::kLibrary: if (b == kTouch) { grid_ = !grid_; top_ = 0; return; } PressLibrary(b); break;
+      case Tab::kDiscover: PressDiscover(b); break;
       case Tab::kActivity: PressActivity(b); break;
       case Tab::kSettings: PressSettings(b); break;
     }
@@ -267,6 +304,15 @@ class App {
       Ask("GET", "/api/catalog"); Ask("GET", "/api/covers.json"); nextCatalog_ = now + 10.0;
     }
     if (connected_ && tab_ == Tab::kLibrary) RequestCovers(now);
+    // DISCOVER: the shelves at start (for the OUT NOW count) and again when the host's ETag moves; the wishlist on the tab every 60 s
+    if (connected_ && !Inflight("/api/discover") && now >= nextDiscover_ &&
+        (!discoverTried_ || (!statusDiscoverEtag_.empty() && statusDiscoverEtag_ != discoverEtag_) || (tab_ == Tab::kDiscover && discoverMissing_))) {
+      Ask("GET", "/api/discover"); nextDiscover_ = now + (discoverMissing_ ? 20.0 : 10.0);
+    }
+    if (connected_ && !Inflight("/api/wishlist") && now >= nextWish_ && (!wishTried_ || tab_ == Tab::kDiscover)) {
+      Ask("GET", "/api/wishlist"); nextWish_ = now + 60.0;
+    }
+    if (connected_ && tab_ == Tab::kDiscover) RequestCoversOf(now, dItems_, dView_, dSel_, dTop_, true, "dsheet");
     if (connected_ && tab_ == Tab::kActivity && now >= nextLog_ && !Inflight("/api/log")) { Ask("GET", "/api/log?lines=80"); nextLog_ = now + 2.0; }
   }
   std::vector<Request> TakeRequests() { std::vector<Request> r; r.swap(out_); return r; }
@@ -279,6 +325,7 @@ class App {
     if (!connected_) { DrawNotConnected(b); DrawToast(b); return; }
     switch (tab_) {
       case Tab::kLibrary: DrawLibrary(b); break;
+      case Tab::kDiscover: DrawDiscover(b); break;
       case Tab::kActivity: DrawActivity(b); break;
       case Tab::kSettings: DrawSettings(b); break;
     }
@@ -330,6 +377,23 @@ class App {
     bool active = false;
     std::string action, tid, title, body, yes;
   } confirm_;
+  // ---- DISCOVER (docs/UI-DESIGN.md 10.5): games he does not have yet, his wishlist, release alerts
+  struct DShelf { std::string key, label; std::vector<int> items; };
+  json::Value discover_;
+  std::vector<Item> dItems_;                 // every Discover game once
+  std::vector<DShelf> dShelves_;
+  std::vector<int> dView_;                   // dItems_ indices: the shelf, then the system filter
+  std::vector<std::string> dSysList_;        // the systems on this shelf (OPTIONS walks them)
+  std::unordered_map<std::string, int> dById_;
+  std::map<int, std::vector<std::pair<std::string, int>>> dsheetCells_;
+  std::unordered_map<std::string, bool> wished_, wishPending_;
+  std::unordered_map<std::string, std::string> alertOf_;   // id -> out / moved (from the host's alerts)
+  std::vector<std::string> wishOrder_;
+  std::string discoverEtag_, statusDiscoverEtag_, dSys_;
+  bool discoverTried_ = false, discoverMissing_ = false, wishTried_ = false;
+  double nextDiscover_ = 0, nextWish_ = 0;
+  int dShelf_ = 0, dSel_ = 0, dTop_ = 0, outCount_ = 0;
+  long long wall_ = 0;                       // the console's clock (the payload's /api/status "now"): "in N days"
 
   static std::string Base(const std::string& path) { auto q = path.find('?'); return q == std::string::npos ? path : path.substr(0, q); }
   bool Inflight(const std::string& p) const { return std::find(inflight_.begin(), inflight_.end(), p) != inflight_.end(); }
@@ -425,20 +489,21 @@ class App {
     sel_ = std::clamp(sel_, 0, std::max(0, int(view_.size()) - 1));
   }
   // covers: the sheets of the rows on screen plus one row ahead (two requests at a time), the full cover after 0.35 s of focus
-  void RequestCovers(double now) {
+  void RequestCovers(double now) { RequestCoversOf(now, items_, view_, sel_, top_, grid_, "sheet"); }
+  void RequestCoversOf(double now, const std::vector<Item>& items, const std::vector<int>& view, int sel, int top, bool grid, const char* kind) {
     int busy = 0;
     for (const auto& f : inflight_) busy += f.rfind("/api/cover/", 0) == 0 || f.rfind("/api/icon/", 0) == 0;
-    const int cols = grid_ ? kCols : 1, rows = grid_ ? kGridRows : kRowsVisible;
-    const int first = std::max(0, (top_ - 1) * cols), last = std::min(int(view_.size()), (top_ + rows + 1) * cols);
+    const int cols = grid ? kCols : 1, rows = grid ? kGridRows : kRowsVisible;
+    const int first = std::max(0, (top - 1) * cols), last = std::min(int(view.size()), (top + rows + 1) * cols);
     for (int i = first; i < last && busy < 2; ++i) {
-      const Item& it = items_[size_t(view_[size_t(i)])];
+      const Item& it = items[size_t(view[size_t(i)])];
       if (it.coverKey.empty() || covers_.Known(it.coverKey)) continue;
-      std::string p = it.page >= 0 ? "/api/cover/sheet/" + std::to_string(it.page) + ".jpg" : "/api/icon/" + it.coverKey;
+      std::string p = it.page >= 0 ? "/api/cover/" + std::string(kind) + "/" + std::to_string(it.page) + ".jpg" : "/api/icon/" + it.coverKey;
       if (Inflight(p)) continue;
       Ask("GET", p);
       ++busy;
     }
-    const Item* f = FocusedItem();
+    const Item* f = sel >= 0 && sel < int(view.size()) ? &items[size_t(view[size_t(sel)])] : nullptr;
     const std::string fid = f ? f->id : "";
     if (fid != focusId_) { focusId_ = fid; focusSince_ = now; }
     if (f && f->page >= 0 && now - focusSince_ > 0.35 && covers_.focusId() != f->id &&
@@ -609,19 +674,27 @@ class App {
   // ---------------------------------------------------------------- top band: name, tabs, live chips
   void DrawTop(Batch& b) {
     b.Text(kGutter, 34, "BLAZINGMOUNT", St(kHead, c::kTextHi));
-    const char* tabs[] = {"Library", "Activity", "Settings"};
+    const char* tabs[] = {"Library", "Discover", "Activity", "Settings"};
     float x = kGutter + b.Width("BLAZINGMOUNT", St(kHead, c::kTextHi)) + 64;
     b.Text(x, 44, "{L1}", St(kMeta, c::kTextDim));
     x += 64;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
       const bool on = int(tab_) == i;
       TextStyle st = St(kBody + 2, on ? c::kTextHi : c::kTextDim);
       b.Text(x, 42, tabs[i], st);
       const float w = b.Width(tabs[i], st);
       if (on) b.Rect(x, 86, x + w, 92, c::kAccent);   // the one accent bar
       x += w + 48;
+      if (i == int(Tab::kDiscover) && outCount_ > 0) {   // wishlist games out now: a solid red count on the tab
+        const std::string n = std::to_string(outCount_);
+        const float cw = std::max(30.0f, b.Width(n.c_str(), St(kWhisper, c::kTextHi)) + 16);
+        Round(b, x - 44, 34, x - 44 + cw, 64, 15, c::kAccent);
+        b.Text(x - 44 + cw / 2, b.TopForCentre(49, kWhisper), n.c_str(), St(kWhisper, c::kTextHi), Align::kCentre);
+        x += cw - 12;
+      }
     }
     b.Text(x - 16, 44, "{R1}", St(kMeta, c::kTextDim));
+    const float tabsEnd = x + 48;
     // right: route, free space, building
     float r = kEdge;
     if (connected_) {
@@ -636,8 +709,11 @@ class App {
       if (!busy.empty()) {
         long long since = status_["busy"]["since"].ll();
         (void)since;
-        std::string t = "BUILDING " + Fit(b, busy, St(kMeta - 2, c::kTextHi), 360);
-        r = Pill(b, r, 64, t.c_str(), 3, c::kBg) - 16;
+        const float room = std::min(360.0f, r - tabsEnd - 28 - b.Width("BUILDING ", St(kMeta - 2, c::kTextHi)));
+        if (room > 60) {
+          std::string t = "BUILDING " + Fit(b, busy, St(kMeta - 2, c::kTextHi), room);
+          r = Pill(b, r, 64, t.c_str(), 3, c::kBg) - 16;
+        }
       }
       if (!hostOk_) Pill(b, r, 64, "DRIVES OFFLINE", 2, c::kBg);
     }
@@ -713,23 +789,25 @@ class App {
     DrawDetail(b);
   }
 
-  void DrawGrid(Batch& b) {
-    const int rowSel = sel_ / kCols;
-    top_ = std::clamp(top_, std::max(0, rowSel - kGridRows + 1), rowSel);
+  void DrawGrid(Batch& b) { DrawGridOf(b, items_, view_, sel_, top_, false); }
+  void DrawGridOf(Batch& b, const std::vector<Item>& items, const std::vector<int>& view, int sel, int& top, bool discover) {
+    const int rowSel = sel / kCols;
+    top = std::clamp(top, std::max(0, rowSel - kGridRows + 1), rowSel);
     for (int r = 0; r < kGridRows; ++r)
       for (int col = 0; col < kCols; ++col) {
-        const int idx = (top_ + r) * kCols + col;
-        if (idx >= int(view_.size())) return;
-        const Item& it = items_[size_t(view_[size_t(idx)])];
-        const bool f = idx == sel_, rowFocused = (top_ + r) == rowSel;
+        const int idx = (top + r) * kCols + col;
+        if (idx >= int(view.size())) return;
+        const Item& it = items[size_t(view[size_t(idx)])];
+        const bool f = idx == sel, rowFocused = (top + r) == rowSel;
         const float x0 = kGutter + col * kPitchX + 10, y0 = kListTop + r * kPitchY, x1 = x0 + kCard, y1 = y0 + kCard;
         if (f) Round(b, x0 - 6, y0 - 6, x1 + 6, y1 + 6, 16, c::kAccent);   // DESIGN-V2 2.6: the 6 px accent halo is the slot
         Art(b, it, x0, y0, x1, y1, f ? 1.0f : rowFocused ? 0.65f : 0.45f, false);
         if (f) b.Rect(x0, y1 + 12, x1, y1 + 18, c::kAccent);              // ...and the one accent bar under the artwork
-        const Badge bd = ItemBadge(it, games_);
+        const Badge bd = discover ? DBadge(it) : ItemBadge(it, games_);
         if (bd.tone != 0 || f) Pill(b, x1 - 6, y1 - 26, bd.text, bd.tone, c::kBg);
         b.Text(x0, y1 + 24, Fit(b, it.title, St(kMeta, f ? c::kTextHi : c::kText), kCard).c_str(), St(kMeta, f ? c::kTextHi : c::kText));
-        std::string sub = it.game >= 0 ? games_[size_t(it.game)].tid : SystemLabel(it);
+        std::string sub = discover ? (it.dateText.empty() ? it.sysLabels : it.dateText + "  \xC2\xB7  " + it.sysLabels)
+                                   : it.game >= 0 ? games_[size_t(it.game)].tid : SystemLabel(it);
         b.Text(x0, y1 + 54, Fit(b, sub, St(kWhisper, c::kTextDim, -0.03f), kCard).c_str(), St(kWhisper, c::kTextDim, -0.03f));
       }
   }
@@ -817,6 +895,228 @@ class App {
       hint += g->choice == "skip" ? "{SQUARE} Show" : "{SQUARE} Hide";
     } else hint = it->plays.empty() ? "" : "Plays on " + it->plays;
     b.Rect(px, y1 - 88, px + pw, y1 - 86, c::kLine);
+    b.Text(px, y1 - 68, Fit(b, hint, St(kMeta, c::kText), pw).c_str(), St(kMeta, c::kText));
+  }
+
+  // ---------------------------------------------------------------- Discover: games he does not have yet (docs/UI-DESIGN.md 10.5)
+  static std::string QueryArg(const std::string& path, const std::string& name) {
+    const auto q = path.find('?');
+    if (q == std::string::npos) return "";
+    const std::string s = "&" + path.substr(q + 1) + "&";
+    auto p = s.find("&" + name + "=");
+    if (p == std::string::npos) return "";
+    p += name.size() + 2;
+    return s.substr(p, s.find('&', p) - p);
+  }
+  static std::string Thousands(long long n) {
+    std::string d = std::to_string(n), out;
+    for (size_t i = 0; i < d.size(); ++i) { if (i && (d.size() - i) % 3 == 0) out += ','; out += d[i]; }
+    return out;
+  }
+  const Item* FocusedD() const { return dSel_ >= 0 && dSel_ < int(dView_.size()) ? &dItems_[size_t(dView_[size_t(dSel_)])] : nullptr; }
+  bool Wished(const Item& it) const { auto w = wished_.find(it.id); return w != wished_.end() && w->second; }
+  std::string SysName(const std::string& key) const {
+    for (const auto& sy : catalog_["systems"].items) if (sy["key"].str() == key) return sy["label"].str();
+    static const std::map<std::string, std::string> k = {{"ps5", "PS5"}, {"ps4", "PS4"}, {"switch", "Switch"}, {"switch2", "Switch 2"},
+                                                         {"pc", "PC"}, {"xsx", "Xbox Series X/S"}, {"xone", "Xbox One"}};
+    auto f = k.find(key);
+    return f != k.end() ? f->second : key;
+  }
+  Badge DBadge(const Item& it) const {
+    auto a = alertOf_.find(it.id);
+    const bool w = Wished(it);
+    if (w && a != alertOf_.end() && a->second == "out") return {"OUT NOW", 3};
+    if (w) return {"WISHLIST", 2};
+    if (it.files) return {"ON MY DRIVES", 1};
+    if (!it.how.empty()) return {it.how == "ps_plus" ? "PS PLUS" : "OWNED", 1};
+    return {"NOT OWNED", 0};
+  }
+  void RebuildDiscover() {
+    const std::string keep = FocusedD() ? FocusedD()->id : "";
+    dItems_.clear(); dsheetCells_.clear(); alertOf_.clear(); dById_.clear(); dShelves_.clear();
+    for (const auto& j : discover_["games"].items) {
+      Item it;
+      it.id = j["id"].str(); it.title = j["title"].str(); it.how = j["owned"].str(); it.files = j["on_drives"].truthy() ? 1 : 0;
+      it.summary = j["summary"].str(); it.dateText = j["date_text"].str(); it.sysLabels = j["sys_labels"].str(); it.date = j["date"].ll();
+      it.hype = int(j["hype"].ll()); it.rating = int(j["rating"].ll()); it.votes = int(j["votes"].ll());
+      for (const auto& x : j["systems"].items) it.syss.push_back(x.str());
+      it.system = it.syss.empty() ? "" : it.syss[0];
+      it.family = "Discover";
+      it.colour = ParseColour(j["colour"].str());
+      if (j["cover"].truthy()) {
+        it.page = int(j["page"].ll()); it.cell = int(j["cell"].ll());
+        dsheetCells_[it.page].push_back({it.id, it.cell});
+        it.coverKey = it.id;
+      }
+      dById_[it.id] = int(dItems_.size());
+      dItems_.push_back(std::move(it));
+    }
+    for (const auto& sh : discover_["shelves"].items) {
+      DShelf d{sh["key"].str(), sh["label"].str(), {}};
+      for (const auto& x : sh["ids"].items) { auto f = dById_.find(x.str()); if (f != dById_.end()) d.items.push_back(f->second); }
+      dShelves_.push_back(std::move(d));
+    }
+    for (const auto& a : discover_["alerts"].items) alertOf_[a["id"].str()] = a["kind"].str();
+    dShelf_ = std::clamp(dShelf_, 0, std::max(0, int(dShelves_.size()) - 1));
+    RebuildDView(keep);
+  }
+  // a shelf's games; the Wishlist shelf is the live wishlist (mac1's /wishlist.json + presses on their way), not the daily file's copy
+  std::vector<int> ShelfItems(int s) const {
+    if (s < 0 || s >= int(dShelves_.size())) return {};
+    const DShelf& d = dShelves_[size_t(s)];
+    if (d.key != "wishlist" || !wishTried_) return d.items;
+    std::vector<int> out;
+    std::unordered_map<std::string, bool> seen;
+    for (const auto& id : wishOrder_) {
+      auto f = dById_.find(id);
+      if (f != dById_.end() && Wished(dItems_[size_t(f->second)]) && !seen[id]) { out.push_back(f->second); seen[id] = true; }
+    }
+    return out;
+  }
+  void RebuildDView(const std::string& keepId) {
+    dView_.clear(); dSysList_.clear();
+    const std::vector<int> all = ShelfItems(dShelf_);
+    static const char* pref[] = {"ps5", "ps4", "switch", "switch2", "pc", "xsx", "xone"};
+    auto rank = [&](const std::string& k) { for (int i = 0; i < 7; ++i) if (k == pref[i]) return i; return 7; };
+    for (int i : all)
+      for (const auto& k : dItems_[size_t(i)].syss)
+        if (std::find(dSysList_.begin(), dSysList_.end(), k) == dSysList_.end()) dSysList_.push_back(k);
+    std::sort(dSysList_.begin(), dSysList_.end(), [&](const std::string& a, const std::string& b2) {
+      return rank(a) != rank(b2) ? rank(a) < rank(b2) : SysName(a) < SysName(b2);
+    });
+    if (!dSys_.empty() && std::find(dSysList_.begin(), dSysList_.end(), dSys_) == dSysList_.end()) dSys_.clear();
+    for (int i : all) {
+      const auto& sy = dItems_[size_t(i)].syss;
+      if (dSys_.empty() || std::find(sy.begin(), sy.end(), dSys_) != sy.end()) dView_.push_back(i);
+    }
+    if (!keepId.empty())
+      for (size_t k = 0; k < dView_.size(); ++k) if (dItems_[size_t(dView_[k])].id == keepId) dSel_ = int(k);
+    dSel_ = std::clamp(dSel_, 0, std::max(0, int(dView_.size()) - 1));
+    outCount_ = 0;
+    for (const auto& kv : alertOf_) {
+      auto w = wished_.find(kv.first);
+      if (kv.second == "out" && w != wished_.end() && w->second) ++outCount_;
+    }
+  }
+  void PressDiscover(Button b) {
+    if (b == kL2 || b == kR2) {
+      if (!dShelves_.empty()) dShelf_ = (dShelf_ + (b == kR2 ? 1 : int(dShelves_.size()) - 1)) % int(dShelves_.size());
+      dSel_ = 0; dTop_ = 0; dSys_.clear(); RebuildDView("");
+      return;
+    }
+    if (b == kOptions) {                                     // the next system on this shelf, then All again
+      if (dSysList_.empty()) return;
+      auto f = std::find(dSysList_.begin(), dSysList_.end(), dSys_);
+      dSys_ = dSys_.empty() ? dSysList_[0] : (f == dSysList_.end() || f + 1 == dSysList_.end()) ? std::string() : *(f + 1);
+      dSel_ = 0; dTop_ = 0; RebuildDView("");
+      return;
+    }
+    const int n = int(dView_.size());
+    if (b == kUp && dSel_ - kCols >= 0) dSel_ -= kCols;
+    if (b == kDown) dSel_ = std::min(n - 1, dSel_ + kCols);
+    if (b == kLeft && dSel_ > 0) --dSel_;
+    if (b == kRight && dSel_ + 1 < n) ++dSel_;
+    dSel_ = std::clamp(dSel_, 0, std::max(0, n - 1));
+    const int row = dSel_ / kCols;
+    dTop_ = std::clamp(dTop_, std::max(0, row - kGridRows + 1), row);
+    const Item* it = FocusedD();
+    if (!it) return;
+    if (b == kTriangle) {                                    // add / remove: shown at once, mac1 confirms (or the card goes back)
+      const bool on = !Wished(*it);
+      const std::string id = it->id, title = it->title;
+      wished_[id] = on; wishPending_[id] = on;
+      if (on && std::find(wishOrder_.begin(), wishOrder_.end(), id) == wishOrder_.end()) wishOrder_.push_back(id);
+      Ask("POST", "/api/action?do=wish&id=" + id + "&value=" + (on ? "1" : "0"));
+      Toast(on ? "Added to your wishlist: " + title : "Removed from your wishlist: " + title);
+      RebuildDView(id);
+    }
+    if (b == kCross) Toast(Wished(*it) ? it->title + " is on your wishlist: {TRIANGLE} removes it" : "{TRIANGLE} adds " + it->title + " to your wishlist");
+  }
+
+  void DrawDiscover(Batch& b) {
+    if (!discoverTried_) { b.Text(kGutter, kListTop + 20, "Reading Discover...", St(kBody, c::kTextDim)); return; }
+    if (dShelves_.empty()) {
+      Round(b, kGutter, kListTop, kEdge, kListTop + 260, 16, c::kSurface);
+      b.Text(kGutter + 40, kListTop + 40, discoverMissing_ ? "Discover is being made on mac1" : "Discover did not answer", St(kHead, c::kTextHi));
+      Wrap(b, kGutter + 40, kListTop + 110, kEdge - kGutter - 80, discoverMissing_
+           ? "New releases, coming soon and the games you don't own yet, with your wishlist. The first time takes a few minutes; this page fills in by itself."
+           : "mac1 did not answer through BlazingMount. This page tries again by itself.", St(kBody, c::kText, -0.03f), 3, 44);
+      return;
+    }
+    const std::string sys = dSys_.empty() ? "All my systems" : SysName(dSys_);
+    const std::string showT = "{START} " + sys;
+    const float showW = b.Width(showT.c_str(), St(kMeta, c::kTextDim));
+    b.Text(kEdge, 140, showT.c_str(), St(kMeta, c::kTextDim), Align::kRight);
+    const float chipsR = kEdge - showW - 72;
+    b.Text(kGutter, 140, "{L2}", St(kMeta, c::kTextDim));
+    float x = kGutter + 56;
+    char t[96];
+    for (int i = 0; i < int(dShelves_.size()); ++i) {
+      std::snprintf(t, sizeof t, "%s  %d", dShelves_[size_t(i)].label.c_str(), int(ShelfItems(i).size()));
+      const float x1 = x + b.Width(t, St(kMeta, c::kTextDim)) + 32;
+      if (x1 > chipsR) break;
+      const bool on = dShelf_ == i;
+      TextStyle st = St(kMeta, on ? c::kTextHi : c::kTextDim);
+      if (on) Outline(b, x, 132, x1, 180, 16, 3, c::kAccent, c::kBg);
+      else Outline(b, x, 132, x1, 180, 16, 2, c::kLine, c::kBg);
+      b.Text(x + 16, b.TopForCentre(156, st.size), t, st);
+      x = x1 + 12;
+    }
+    b.Text(x + 4, 140, "{R2}", St(kMeta, c::kTextDim));
+    if (dView_.empty()) {
+      const bool wl = dShelf_ < int(dShelves_.size()) && dShelves_[size_t(dShelf_)].key == "wishlist";
+      b.Text(kGutter, kListTop + 20, wl ? "Your wishlist is empty: {TRIANGLE} on any game adds it" : "Nothing here", St(kBody, c::kTextDim));
+      return;
+    }
+    DrawGridOf(b, dItems_, dView_, dSel_, dTop_, true);
+    const float listR = 1110;
+    const int rows = (int(dView_.size()) + kCols - 1) / kCols;
+    if (rows > kGridRows) {
+      const float h = kBottom - kListTop, th = std::max(40.0f, h * kGridRows / rows);
+      const float ty = kListTop + (h - th) * (float(dTop_) / std::max(1, rows - kGridRows));
+      b.Rect(listR + 14, kListTop, listR + 18, kListTop + h, c::kLine);
+      b.Rect(listR + 12, ty, listR + 20, ty + th, c::kAccent);
+    }
+    DrawDDetail(b);
+  }
+
+  void DrawDDetail(Batch& b) {
+    const Item* it = FocusedD();
+    if (!it) return;
+    const float x0 = 1158, y0 = kListTop, x1 = kEdge, y1 = kBottom;
+    Round(b, x0, y0, x1, y1, 16, c::kSurface);
+    const float px = x0 + 32, pw = x1 - x0 - 64;
+    Art(b, *it, px, y0 + 32, px + 200, y0 + 232, 1.0f, true);
+    const float ty = Wrap(b, px + 224, y0 + 36, pw - 224, it->title, St(kHead - 4, c::kTextHi), 3, 50);
+    const Badge bd = DBadge(*it);
+    Pill(b, px + 224 + b.Width(bd.text, St(kMeta - 2, c::kText)) + 28, std::max(ty + 26, y0 + 200), bd.text, bd.tone, c::kSurface);
+    float y = y0 + 264;
+    b.Rect(px, y - 14, px + pw, y - 12, c::kLine);
+    const bool wished = Wished(*it);
+    auto a = alertOf_.find(it->id);
+    const bool alert = wished && a != alertOf_.end();
+    std::string rel;
+    if (!it->date) rel = "not announced yet";
+    else if (wall_ && it->date <= wall_) rel = "out since " + it->dateText;
+    else {
+      rel = it->dateText;
+      if (wall_) { const long long d = (it->date - wall_ + 86399) / 86400; rel += "   (in " + std::to_string(d) + (d == 1 ? " day)" : " days)"); }
+    }
+    Fact(b, px, y, pw, "Release", rel, alert ? c::kAccent : c::kText);
+    if (alert && a->second == "moved") Fact(b, px, y, pw, "Date moved", "the date changed since you added it", c::kAccent);
+    Fact(b, px, y, pw, "Systems", it->sysLabels);
+    std::string yours = it->how.empty() ? "Not owned" : it->how == "ps_plus" ? "PS Plus" : "Owned";
+    if (it->files) yours += ", on my drives";
+    Fact(b, px, y, pw, "Yours", yours, it->how.empty() ? c::kTextDim : c::kGood);
+    if (it->votes > 0) Fact(b, px, y, pw, "Rating", std::to_string(it->rating) + " / 100   (" + Thousands(it->votes) + " ratings)");
+    else if (it->hype > 0) Fact(b, px, y, pw, "Waiting", Thousands(it->hype) + (it->hype == 1 ? " person follows it" : " people follow it"));
+    const int lines = std::clamp(int((y1 - 110 - y) / 34), 0, 4);
+    if (!it->summary.empty() && lines > 0) {
+      b.Text(px, y, "About", St(kWhisper, c::kTextDim));
+      Wrap(b, px + 190, y - 3, pw - 190, it->summary, St(kMeta, c::kText, -0.03f), lines, 34);
+    }
+    b.Rect(px, y1 - 88, px + pw, y1 - 86, c::kLine);
+    const std::string hint = wished ? "{TRIANGLE} Remove from wishlist" : "{TRIANGLE} Add to wishlist";
     b.Text(px, y1 - 68, Fit(b, hint, St(kMeta, c::kText), pw).c_str(), St(kMeta, c::kText));
   }
 

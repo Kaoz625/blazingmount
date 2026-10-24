@@ -26,7 +26,11 @@
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
 //   GET  /api/catalog                the host's /library.json: EVERY game Markus owns on every system (blazingmount host/library)
 //   GET  /api/covers.json            where each cover sits in the sprite sheets (page, cell, colour)
-//   GET  /api/cover/<thumb|full|sheet>/<id>.jpg   a cover from the host (passed through, nothing kept on the console)
+//   GET  /api/cover/<thumb|full|sheet|dsheet>/<id>.jpg   a cover from the host (passed through, nothing kept on the console)
+//   GET  /api/discover, /api/wishlist   DISCOVER: the host's /discover.json and /wishlist.json, passed through
+//   POST /api/action?do=wish&id=<12 hex>&value=1|0   add / remove a Discover game on the ONE wishlist on mac1: forwarded at once to
+//        the host's POST /wishlist (the only thing this API sends; no console file is touched). Each pass also turns the host's
+//        Discover alerts into ONE PS5 notice each (bm_api_alerts, main thread, /data/blazing/alerts-seen.tsv capped at 200 lines)
 //   GET  /                           a small status page (browser fallback)
 
 #include <pthread.h>
@@ -144,6 +148,138 @@ static long long api_get(const conf_t *c, const char *path, char **out, int time
     memmove(b.b, body, bl); b.b[bl] = 0;
     *out = b.b;
     return (long long)bl;
+}
+
+// ---------------------------------------------------------------- DISCOVER (docs/UI-DESIGN.md 10.5): the wishlist press + release alerts
+static const char *js_str(const char *p, char *out, size_t on);   // below (the host's games)
+// One request to the host with a method, an optional extra header line, and the answer's status, ETag and body (cap 16 MB). LAN first,
+// then the tsnet proxy (absolute-form), like api_get. Used by the wishlist forward (API thread) and the alert check (main thread):
+// it has no shared buffers, so both may call it.
+static int api_http(const conf_t *c, const char *method, const char *path_query, const char *extra, char **body, size_t *blen,
+                    char *etag, size_t en, int timeout_s) {
+    *body = NULL; if (blen) *blen = 0; if (etag && en) etag[0] = 0;
+    int s = connect_ms(c->host, c->port, LAN_CONNECT_MS), px = 0;
+    if (s < 0 && g_px_port && g_ts_port) { s = connect_ms(g_px_host, g_px_port, timeout_s * 1000); px = 1; }
+    if (s < 0) return -1;
+    struct timeval tv = { timeout_s, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    char req[1600];
+    int rl = px ? snprintf(req, sizeof req, "%s http://%s:%d%s HTTP/1.0\r\nHost: %s:%d\r\n%s%sConnection: close\r\n\r\n", method, g_ts_host, g_ts_port,
+                           path_query, g_ts_host, g_ts_port, extra ? extra : "", strcmp(method, "POST") ? "" : "Content-Length: 0\r\n")
+                : snprintf(req, sizeof req, "%s %s HTTP/1.0\r\nHost: %s\r\n%s%sConnection: close\r\n\r\n", method, path_query, c->host,
+                           extra ? extra : "", strcmp(method, "POST") ? "" : "Content-Length: 0\r\n");
+    if (rl <= 0 || rl >= (int)sizeof req || write_all(s, req, (size_t)rl) != 0) { close(s); return -1; }
+    sb_t b = { 0 }; char chunk[16384];
+    for (;;) { ssize_t n = read(s, chunk, sizeof chunk); if (n <= 0) break; sb_put(&b, chunk, (size_t)n); if (b.n > (16u << 20)) break; }
+    close(s);
+    if (!b.b) return -1;
+    int status = (b.n > 12 && !strncmp(b.b, "HTTP/1.", 7)) ? atoi(b.b + 9) : 0;
+    char *hend = strstr(b.b, "\r\n\r\n");
+    if (!hend) { free(b.b); return status ? status : -1; }
+    *hend = 0;
+    if (etag && en) { char *e = strcasestr(b.b, "\nETag: \""); if (e) sscanf(e + 8, "%63[^\"]", etag); if (en < 64) etag[en - 1] = 0; }
+    size_t bl = b.n - (size_t)(hend + 4 - b.b);
+    memmove(b.b, hend + 4, bl); b.b[bl] = 0;
+    *body = b.b; if (blen) *blen = bl;
+    return status;
+}
+
+static int valid_did(const char *t) {                           // a Discover game id: 12 lower-case hex (sha1 of "igdb:<n>")
+    if (strlen(t) != 12) return 0;
+    for (int i = 0; i < 12; i++) if (!((t[i] >= '0' && t[i] <= '9') || (t[i] >= 'a' && t[i] <= 'f'))) return 0;
+    return 1;
+}
+
+// the end of the JSON value that starts at p ('{' or '['), strings and escapes respected; NULL when it does not end
+static const char *js_end(const char *p) {
+    int depth = 0, str = 0;
+    for (; *p; p++) {
+        if (str) { if (*p == '\\' && p[1]) p++; else if (*p == '"') str = 0; continue; }
+        if (*p == '"') str = 1;
+        else if (*p == '{' || *p == '[') depth++;
+        else if ((*p == '}' || *p == ']') && --depth == 0) return p;
+    }
+    return NULL;
+}
+// a string field of ONE flat object [obj, end]: "name":"value" (decoded); 1 when found
+static int js_field(const char *obj, const char *end, const char *name, char *out, size_t on) {
+    char pat[48]; snprintf(pat, sizeof pat, "\"%s\":", name);
+    out[0] = 0;
+    for (const char *p = obj; p && p < end; ) {
+        const char *q = strstr(p, pat);
+        if (!q || q >= end) return 0;
+        q += strlen(pat); while (*q == ' ') q++;
+        if (*q == '"') { js_str(q, out, on); return 1; }
+        p = q;
+    }
+    return 0;
+}
+
+// PS5 notice (the TV toast). On the host build it is only logged, so the fake-console test can count them.
+#ifdef __PROSPERO__
+typedef struct { char useless1[45]; char message[3075]; } bm_notify_t;
+int sceKernelSendNotificationRequest(int, bm_notify_t *, size_t, int);
+#endif
+static void bm_notice(const char *msg) {
+#ifdef __PROSPERO__
+    bm_notify_t n; memset(&n, 0, sizeof n); snprintf(n.message, sizeof n.message, "%s", msg);
+    sceKernelSendNotificationRequest(0, &n, sizeof n, 0);
+#endif
+    logf_("notice: %s", msg);
+}
+
+#define ALERTS_SEEN "/data/blazing/alerts-seen.tsv"
+#define ALERTS_KEEP 200
+static char g_disc_etag[64];                         // the host's /discover.json ETag (main thread writes, under g_api_mu)
+
+// main thread, every pass: the host's Discover alerts (a wishlisted game is out, or its date moved) -> ONE PS5 notice each, ever.
+// A conditional GET: the file is downloaded only when its ETag moved (once a day, or when the wishlist changed).
+static void bm_api_alerts(const conf_t *c) {
+    char cur[64], hdr[120] = "", etag[64] = "";
+    pthread_mutex_lock(&g_api_mu); snprintf(cur, sizeof cur, "%s", g_disc_etag); pthread_mutex_unlock(&g_api_mu);
+    if (cur[0]) snprintf(hdr, sizeof hdr, "If-None-Match: \"%s\"\r\n", cur);
+    char *m = NULL; size_t n = 0;
+    int st = api_http(c, "GET", "/discover.json", hdr, &m, &n, etag, sizeof etag, 15);
+    if (st != 200 || !m) { free(m); return; }                    // 304 (unchanged), 404 (not made yet), or the host is away
+    const char *a = strstr(m, "\"alerts\":");                     // "alerts": [ ... ] (any spacing)
+    if (a) { a += 9; while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r') a++; if (*a != '[') a = NULL; }
+    const char *ae = a ? js_end(a) : NULL;
+    char sp[600]; P(sp, sizeof sp, ALERTS_SEEN);
+    size_t sl = 0; char *seen = api_slurp(sp, 256 * 1024, &sl);
+    sb_t add = { 0 }; int fresh = 0;
+    for (const char *p = a ? a + 1 : NULL; p && ae && p < ae; ) {
+        const char *o = strchr(p, '{'); if (!o || o >= ae) break;
+        const char *oe = js_end(o); if (!oe || oe > ae) break;
+        char key[96], kind[16], title[300], date[48];
+        js_field(o, oe, "key", key, sizeof key); js_field(o, oe, "kind", kind, sizeof kind);
+        js_field(o, oe, "title", title, sizeof title); js_field(o, oe, "date_text", date, sizeof date);
+        p = oe + 1;
+        if (!key[0] || strchr(key, '\n') || strchr(key, '\t')) continue;
+        char line[100]; snprintf(line, sizeof line, "%s\n", key);
+        int known = 0;
+        if (seen) for (const char *q = seen; (q = strstr(q, key)); q += strlen(key)) if ((q == seen || q[-1] == '\n') && q[strlen(key)] == '\n') { known = 1; break; }
+        if (!known && add.b) for (const char *q = add.b; (q = strstr(q, key)); q += strlen(key)) if ((q == add.b || q[-1] == '\n') && q[strlen(key)] == '\n') { known = 1; break; }
+        if (known) continue;
+        char msg[420];
+        if (!strcmp(kind, "out")) snprintf(msg, sizeof msg, "Out now: %s (on your wishlist)", title);
+        else if (!strcmp(kind, "moved")) snprintf(msg, sizeof msg, "New date for %s: %s (wishlist)", title, date);
+        else continue;
+        bm_notice(msg);
+        sb_puts(&add, line); fresh++;
+    }
+    if (fresh) {                                                   // seen = old + new, only the last ALERTS_KEEP lines (it never grows)
+        sb_t all = { 0 };
+        if (seen) sb_puts(&all, seen);
+        sb_puts(&all, add.b);
+        int lines = 0; for (size_t i = 0; i < all.n; i++) lines += all.b[i] == '\n';
+        const char *from = all.b;
+        while (lines > ALERTS_KEEP) { from = strchr(from, '\n') + 1; lines--; }
+        char dp[600], t[640]; makedirs(P(dp, sizeof dp, "/data/blazing")); snprintf(t, sizeof t, "%s.tmp", sp);
+        if (write_file(t, from, strlen(from)) == 0) rename(t, sp);
+        free(all.b);
+    }
+    free(add.b); free(seen); free(m);
+    if (etag[0]) { pthread_mutex_lock(&g_api_mu); if (strcmp(g_disc_etag, etag)) { snprintf(g_disc_etag, sizeof g_disc_etag, "%s", etag); g_gen++; } pthread_mutex_unlock(&g_api_mu); }
 }
 
 static int get_q(const char *query, const char *name, char *out, size_t on) {   // query parameter, %-decoded; 1 when found
@@ -479,6 +615,7 @@ static void api_status(sb_t *o) {
     sb_puts(o, ",\"smp\":"); sb_js(o, ver); sb_puts(o, ",\"smp_expected\":"); sb_js(o, c.smp_version);
     sb_puts(o, ",\"homebrew_dir\":"); sb_js(o, c.homebrew_dir);
     sb_puts(o, ",\"catalog_etag\":"); sb_js(o, g_catalog_etag);
+    pthread_mutex_lock(&g_api_mu); sb_puts(o, ",\"discover_etag\":"); sb_js(o, g_disc_etag); pthread_mutex_unlock(&g_api_mu);
     sb_f(o, ",\"free_mb\":{\"data\":%lld,\"ext0\":%lld,\"ext1\":%lld,\"usb0\":%lld},\"min_free_mb\":%lld,\"fork\":\"%.16s\"}",
          dir_free("/data"), dir_free("/mnt/ext0"), dir_free("/mnt/ext1"), dir_free("/mnt/usb0"), c.min_free_mb, BM_FORK_SHA);
 }
@@ -672,6 +809,7 @@ static void bm_api_pass_begin(conf_t *c) {
         if (c->n_only == had && c->n_only < MAX_LIST) snprintf(c->only[c->n_only++], 40, "NONE");
     }
     free(ch);
+    bm_api_alerts(c);                                             // wishlist release alerts -> one PS5 notice each (DISCOVER)
     pthread_mutex_lock(&g_api_mu); g_last_pass = time(NULL); g_gen++; pthread_mutex_unlock(&g_api_mu);
 }
 
@@ -718,14 +856,17 @@ static void api_handle(int s) {
         char v[16]; int n = get_q(query, "lines", v, sizeof v) ? atoi(v) : 200; if (n < 1) n = 1; if (n > 2000) n = 2000;
         api_log(&b, n); reply_json(s, 200, &b);
     }
-    else if (!strcmp(method, "GET") && (!strcmp(target, "/api/catalog") || !strcmp(target, "/api/covers.json") || !strncmp(target, "/api/cover/", 11))) {
+    else if (!strcmp(method, "GET") && (!strcmp(target, "/api/catalog") || !strcmp(target, "/api/covers.json") || !strncmp(target, "/api/cover/", 11)
+                                       || !strcmp(target, "/api/discover") || !strcmp(target, "/api/wishlist"))) {
         // passed through from the host (LAN, else the tsnet proxy); a cover name is checked so nothing else on the host can be asked for
         char hp[200] = ""; const char *ct = "application/json";
         if (!strcmp(target, "/api/catalog")) snprintf(hp, sizeof hp, "/library.json");
         else if (!strcmp(target, "/api/covers.json")) snprintf(hp, sizeof hp, "/covers.json");
+        else if (!strcmp(target, "/api/discover")) snprintf(hp, sizeof hp, "/discover.json");
+        else if (!strcmp(target, "/api/wishlist")) snprintf(hp, sizeof hp, "/wishlist.json");
         else {
             char kind[8] = "", name[40] = ""; const char *q = target + 11;
-            if (sscanf(q, "%7[a-z]/%39s", kind, name) == 2 && (!strcmp(kind, "thumb") || !strcmp(kind, "full") || !strcmp(kind, "sheet"))) {
+            if (sscanf(q, "%7[a-z]/%39s", kind, name) == 2 && (!strcmp(kind, "thumb") || !strcmp(kind, "full") || !strcmp(kind, "sheet") || !strcmp(kind, "dsheet"))) {
                 size_t L = strlen(name); int ok = L > 4 && L <= 16 && !strcmp(name + L - 4, ".jpg");
                 for (size_t i = 0; ok && i + 4 < L; i++) if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f'))) ok = 0;
                 if (ok) { snprintf(hp, sizeof hp, "/covers/%s/%s", kind, name); ct = "image/jpeg"; }
@@ -749,6 +890,17 @@ static void api_handle(int s) {
             char what[16], tid[16], key[48], value[256];
             get_q(query, "do", what, sizeof what); get_q(query, "tid", tid, sizeof tid);
             get_q(query, "key", key, sizeof key); get_q(query, "value", value, sizeof value);
+            if (!strcmp(what, "wish")) {
+                char id[16] = ""; get_q(query, "id", id, sizeof id);
+                if (!valid_did(id) || (strcmp(value, "0") && strcmp(value, "1"))) { sb_f(&b, "{\"ok\":false,\"error\":\"bad game id or value\"}"); reply_json(s, 400, &b); free(b.b); return; }
+                conf_t c; read_conf(&c);
+                char hp[80]; snprintf(hp, sizeof hp, "/wishlist?id=%s&on=%s", id, value);
+                char *m = NULL; int st = api_http(&c, "POST", hp, "X-BM-Request: 1\r\n", &m, NULL, NULL, 0, 8);
+                logf_("ui: wishlist %s %s -> %s", value[0] == '1' ? "add" : "remove", id, st == 200 ? "done" : st < 0 ? "mac1 did not answer" : "refused");
+                if (st == 200) { sb_f(&b, "{\"ok\":true,\"wish\":\"%s\",\"on\":%s}", id, value[0] == '1' ? "true" : "false"); reply_json(s, 200, &b); }
+                else { sb_f(&b, "{\"ok\":false,\"error\":"); sb_js(&b, st < 0 ? "mac1 did not answer" : st == 404 ? "not a Discover game on mac1" : "mac1 refused it"); sb_puts(&b, "}"); reply_json(s, 502, &b); }
+                free(m); free(b.b); return;
+            }
             const char *err = api_enqueue(what, tid, key, value);
             if (err) { sb_f(&b, "{\"ok\":false,\"error\":"); sb_js(&b, err); sb_put(&b, "}", 1); reply_json(s, 400, &b); }
             else { sb_f(&b, "{\"ok\":true,\"queued\":"); sb_js(&b, what); sb_put(&b, "}", 1); reply_json(s, 200, &b); }

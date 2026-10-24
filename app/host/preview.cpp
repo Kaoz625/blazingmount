@@ -31,7 +31,8 @@ std::string Read(const std::string& p) {
 // /library.json, /covers.json, /covers/<thumb|full|sheet>/<id>.jpg); a folder path reads the same names from disk.
 std::string HostData(const std::string& base, const std::string& rel) {
   if (base.rfind("http://", 0) != 0) return Read(base + "/" + rel);
-  std::string url = base + "/" + (rel == "library.json" || rel == "covers.json" ? rel : "covers/" + rel);
+  const bool top = rel.size() > 5 && rel.compare(rel.size() - 5, 5, ".json") == 0;      // library / covers / discover / wishlist .json
+  std::string url = base + "/" + (top ? rel : "covers/" + rel);
   if (url.find_first_of("'\\ \n") != std::string::npos) return "";
   std::string body;
   if (FILE* p = popen(("curl -s -f --max-time 30 '" + url + "'").c_str(), "r")) {
@@ -58,9 +59,11 @@ struct Rig {
         std::string file = base == "/api/status" ? "status.json" : base == "/api/library" ? "library.json" : base == "/api/settings" ? "settings.json"
                          : base == "/api/log" ? "log.json" : "";
         if (offline) { app.OnResponse(r.path, 0, ""); continue; }
-        if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0) {   // BM_HOSTDATA: the host's files
+        if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0 || base == "/api/discover"
+            || base == "/api/wishlist") {   // BM_HOSTDATA: the host's files
           const char* d = std::getenv("BM_HOSTDATA");
-          std::string rel = base == "/api/catalog" ? "library.json" : base == "/api/covers.json" ? "covers.json" : r.path.substr(11);
+          std::string rel = base == "/api/catalog" ? "library.json" : base == "/api/covers.json" ? "covers.json" : base == "/api/discover" ? "discover.json"
+                          : base == "/api/wishlist" ? "wishlist.json" : r.path.substr(11);
           std::string data = d ? HostData(d, rel) : "";
           app.OnResponse(r.path, data.empty() ? 404 : 200, data);
           continue;
@@ -123,7 +126,7 @@ int main(int argc, char** argv) {
   if (on("05-sort-status")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kOptions); r.Press(kOptions); bad += Shot(font, r, out + "/05-sort-status"); }
   if (on("06-remove-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kDown); r.Press(kCross); bad += Shot(font, r, out + "/06-remove-confirm"); }
   if (on("07-install-toast")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR2); r.Press(kR2); r.Press(kCross); bad += Shot(font, r, out + "/07-install-toast"); }
-  if (on("08-activity")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(2.5); bad += Shot(font, r, out + "/08-activity"); }
+  if (on("08-activity")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); bad += Shot(font, r, out + "/08-activity"); }
   if (on("09-settings")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kL1); r.Wait(0.5); for (int i = 0; i < 5; ++i) r.Press(kDown); r.Press(kRight); bad += Shot(font, r, out + "/09-settings"); }
   if (on("10-not-running")) { Rig r; r.dir = fx; r.offline = true; r.Wait(0); r.Wait(3); bad += Shot(font, r, out + "/10-not-running"); }
   if (on("11-all-grid")) { Rig r; r.dir = fx; r.Wait(0); r.Wait(1); for (int i = 0; i < 6; ++i) r.Press(kRight); r.Wait(1); bad += Shot(font, r, out + "/11-all-grid"); }
@@ -131,6 +134,15 @@ int main(int argc, char** argv) {
   if (on("13-nintendo-grid")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 7; ++i) r.Press(kR2); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/13-nintendo-grid"); }
   if (on("14-on-drives-list")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kOptions); r.Press(kOptions); r.Press(kTouch); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/14-on-drives-list"); }
   if (on("15-retro-grid")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 11; ++i) r.Press(kR2); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/15-retro-grid"); }
+  // DISCOVER (R1 from the Library): shelves on L2 / R2, systems on OPTIONS, TRIANGLE = wishlist
+  if (on("16-discover-new")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(1); r.Press(kRight); r.Wait(1); bad += Shot(font, r, out + "/16-discover-new"); }
+  if (on("17-discover-soon")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); r.Press(kR2); r.Press(kRight); r.Press(kRight); r.Wait(1);
+                                bad += Shot(font, r, out + "/17-discover-soon"); }
+  if (on("18-discover-wish-toast")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); r.Press(kR2); r.Press(kDown); r.Wait(0.5); r.Press(kTriangle);
+                                      bad += Shot(font, r, out + "/18-discover-wish-toast"); }
+  if (on("19-discover-notable-system")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); for (int i = 0; i < 3; ++i) r.Press(kR2);
+                                          for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Wait(1); bad += Shot(font, r, out + "/19-discover-notable-system"); }
+  if (on("20-discover-wishlist")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); r.Press(kL2); r.Wait(1); bad += Shot(font, r, out + "/20-discover-wishlist"); }
   std::printf(bad ? "%d FAIL\n" : "ALL SHOTS OK\n", bad);
   return bad ? 1 : 0;
 }

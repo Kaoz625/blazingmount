@@ -9,7 +9,7 @@
 # The fork's bytes go into out/fork_blob.h (generated, not committed) and from there into the payload: a console needs no loose fork file.
 # Optional: BM_DEFAULT_HOST=192.168.1.130 (the host's imgserve; /data/blazing/mount.conf still overrides it on a console).
 # Optional: BM_REV=<short sha> when building from an exported tree with no git (`git archive <pushed sha>` on the build machine):
-#   the payload then logs "blazingmountd 2.6-<sha> start" instead of "2.6-local+dirty" (v2.5 on both consoles logs "2.0-local+dirty").
+#   the payload then logs "blazingmountd 2.7-<sha> start" instead of "2.7-local+dirty" (v2.5 on both consoles logs "2.0-local+dirty").
 #
 # Install (reboot-surviving): a payload-manager LOCAL SLOT + one autoload line - see ../../install/blazingmount-autoload.md. In a boot list
 # it runs unattended with no arguments: it loops and only writes under /data/homebrew, /data/blazing and /data/blz-stage.
@@ -19,9 +19,9 @@ FORK="${FORK:-$HERE/../link-fork/prebuilt/libSceAmpr.sprx}"
 [ -f "$FORK" ] || { echo "no fork at $FORK (set FORK=...)"; exit 1; }
 mkdir -p "$HERE/out"
 if [ -n "$BM_REV" ]; then
-  VERSION="2.6-$BM_REV"
+  VERSION="2.7-$BM_REV"
 else
-  VERSION="2.6-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo local)$(git -C "$HERE" diff --quiet -- src 2>/dev/null || echo '+dirty')"
+  VERSION="2.7-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo local)$(git -C "$HERE" diff --quiet -- src 2>/dev/null || echo '+dirty')"
 fi
 python3 -I - "$FORK" "$HERE/out/fork_blob.h" <<'EOF'
 import hashlib, sys

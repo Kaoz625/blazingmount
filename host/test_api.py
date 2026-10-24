@@ -12,6 +12,9 @@ host/api_hooks.py are applied to a temp copy), runs it resident against a fake c
   4. remove is refused while the game runs, and never deletes a full copy
   5. hide / unhide (forget) / set / auto land in choices.tsv and mount.conf
   6. a game added on the drives shows up by itself (the API's watch) and, with auto on, gets built without any request
+  7. DISCOVER: /api/discover + /api/wishlist + dsheet covers pass through; a wish press is forwarded at once to the host's POST /wishlist
+     with X-BM-Request (bad ids refused, a host refusal reported); the host's alerts raise ONE notice each per pass, never twice (304,
+     same alerts under a new ETag), a new alert raises one more, and alerts-seen.tsv stays capped at 200 lines
 """
 import hashlib, http.server, urllib.error, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
 
@@ -29,8 +32,18 @@ def game(tid, title, fw="4.50"):
 GAMES = [game("PPSA90001", "Alpha Game"), game("PPSA90002", "Beta Game"), game("PPSA90003", "Gamma Needs FW", fw="99.00")]
 LATE = game("PPSA90004", "Delta Added Later")
 
+DISC = {"etag": "disc0001", "alerts": [
+    {"id": "aaaaaaaaaaaa", "title": "Wished \u00e9 Game", "kind": "out", "date": 1761200000, "key": "aaaaaaaaaaaa:out:1761200000", "date_text": "23 Oct 2026"},
+    {"id": "bbbbbbbbbbbb", "title": "Later Big", "kind": "moved", "date": 1766000000, "key": "bbbbbbbbbbbb:moved:1766000000", "date_text": "17 Dec 2026"}]}
+WISH_POSTS = []
+
 class Fake(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+    def do_POST(self):
+        WISH_POSTS.append((self.path, self.headers.get("X-BM-Request")))
+        ok = self.path.startswith("/wishlist?id=aaaaaaaaaaaa&on=")
+        body = b'{"ok":true}' if ok else b'{"ok":false,"error":"not a game in discover.json"}'
+        self.send_response(200 if ok else 404); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
     def send(self, body, ctype="text/plain"):
         self.send_response(200); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body))); self.end_headers()
         self.wfile.write(body)
@@ -50,6 +63,17 @@ class Fake(http.server.BaseHTTPRequestHandler):
             return self.send(b'{"covers":{"aaaaaaaaaaaa":{"page":0,"cell":0}}}', "application/json")
         if p == "/covers/thumb/aaaaaaaaaaaa.jpg":
             return self.send(b"\xff\xd8\xff" + b"0" * 100, "image/jpeg")
+        if p == "/discover.json":
+            tag = '"%s"' % DISC["etag"]
+            if self.headers.get("If-None-Match") == tag:
+                self.send_response(304); self.send_header("ETag", tag); self.end_headers(); return
+            body = json.dumps({"alerts": DISC["alerts"], "shelves": [], "games": [{"id": "aaaaaaaaaaaa", "title": "Wished \u00e9 Game"}]}).encode()
+            self.send_response(200); self.send_header("ETag", tag); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            return self.wfile.write(body)
+        if p == "/wishlist.json":
+            return self.send(b'{"version":1,"items":[{"id":"aaaaaaaaaaaa"}]}', "application/json")
+        if p == "/covers/dsheet/0.jpg":
+            return self.send(b"\xff\xd8\xff" + b"1" * 50, "image/jpeg")
         if p == "/proven.tsv":
             return self.send(b"PPSA90001\tDIGI5\t2026-10-24 10:00\tplayed: New Game, walked\n")
         for g in GAMES:
@@ -146,6 +170,34 @@ def main():
             try: get(path); return 200
             except urllib.error.HTTPError as e: return e.code
         check(code("/api/cover/thumb/../../etc.jpg") == 404 and code("/api/cover/evil/aaaaaaaaaaaa.jpg") == 404, "a bad cover name is refused")
+        # 7) DISCOVER: pass-through, the wish press, release alerts
+        check(j("/api/discover")["alerts"][0]["kind"] == "out" and j("/api/wishlist")["items"][0]["id"] == "aaaaaaaaaaaa", "/api/discover + /api/wishlist passed through")
+        check(get("/api/cover/dsheet/0.jpg").startswith(b"\xff\xd8") and code("/api/cover/dsheet/x0.jpg") == 404, "a dsheet cover passed through; a bad name refused")
+        st, r = act("do=wish&id=aaaaaaaaaaaa&value=1")
+        check(st == 200 and r["ok"] and WISH_POSTS[-1] == ("/wishlist?id=aaaaaaaaaaaa&on=1", "1"), "wish press forwarded at once to POST /wishlist with X-BM-Request")
+        check(act("do=wish&id=aaaaaaaaaaaa&value=1", header=False)[0] == 403 and act("do=wish&id=../../x&value=1")[0] == 400
+              and act("do=wish&id=aaaaaaaaaaaa&value=7")[0] == 400, "wish: no header / bad id / bad value refused, nothing forwarded")
+        st, r = act("do=wish&id=cccccccccccc&value=1")
+        check(st == 502 and "not a Discover game" in r["error"], "the host's refusal is reported to the app")
+        logp = os.path.join(b, "blazingmountd.log")
+        notices = lambda: [l for l in open(logp).read().splitlines() if "notice: " in l]
+        check(wait(lambda: len(notices()) == 2), "the host's 2 alerts raised 2 notices at a pass")
+        check(any("notice: Out now: Wished \u00e9 Game (on your wishlist)" in l for l in notices())
+              and any("notice: New date for Later Big: 17 Dec 2026 (wishlist)" in l for l in notices()), "notice texts (out / moved), the title decoded")
+        check(wait(lambda: j("/api/status")["discover_etag"] == "disc0001"), "status carries the Discover ETag")
+        seenp = os.path.join(b, "alerts-seen.tsv")
+        check(open(seenp).read().split() == ["aaaaaaaaaaaa:out:1761200000", "bbbbbbbbbbbb:moved:1766000000"], "both keys remembered on the console")
+        act("do=sync"); time.sleep(2.5)
+        check(len(notices()) == 2, "next pass (304, unchanged): no notice again")
+        DISC["etag"] = "disc0002"; act("do=sync")
+        check(wait(lambda: j("/api/status")["discover_etag"] == "disc0002") and len(notices()) == 2, "new ETag, same alerts: still no repeat")
+        kept = open(seenp).read()                                 # (read first: open(..., "w") would empty it before the read)
+        open(seenp, "w").write("".join("old:%d\n" % i for i in range(250)) + kept)
+        DISC["alerts"].append({"id": "dddddddddddd", "title": "Third", "kind": "out", "date": 1761300000, "key": "dddddddddddd:out:1761300000", "date_text": "24 Oct 2026"})
+        DISC["etag"] = "disc0003"; act("do=sync")
+        check(wait(lambda: len(notices()) == 3), "a new alert raises exactly one more notice" + ("" if len(notices()) == 3 else ": %r" % notices()))
+        lines = open(seenp).read().splitlines()
+        check(len(lines) == 200 and lines[-1] == "dddddddddddd:out:1761300000" and "aaaaaaaaaaaa:out:1761200000" in lines, "alerts-seen.tsv capped at 200 lines, newest kept")
         # 2) refusals
         check(act("do=install&tid=PPSA90001", header=False)[0] == 403, "POST without X-BM-Request is refused")
         check(act("do=explode&tid=PPSA90001")[0] == 400, "unknown action refused")
