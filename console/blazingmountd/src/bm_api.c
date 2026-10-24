@@ -24,6 +24,9 @@
 //   GET  /api/icon/<TID>             icon0.png (local starter, else cached, else fetched from the host once)
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
+//   GET  /api/catalog                the host's /library.json: EVERY game Markus owns on every system (blazingmount host/library)
+//   GET  /api/covers.json            where each cover sits in the sprite sheets (page, cell, colour)
+//   GET  /api/cover/<thumb|full|sheet>/<id>.jpg   a cover from the host (passed through, nothing kept on the console)
 //   GET  /                           a small status page (browser fallback)
 
 #include <pthread.h>
@@ -48,6 +51,7 @@ static unsigned long g_gen = 1;                     // bumps whenever the librar
 static char g_busy_tid[16], g_busy_title[256]; static time_t g_busy_since;
 static char g_recent[8][300]; static int g_nrecent; // the last action results, newest last
 static time_t g_last_pass; static char g_host_sig[64];
+static char g_catalog_etag[64];                   // the host's /library.json ETag (everything Markus owns): the app reloads when it moves
 static int g_api_started;
 
 static void api_bump(void) { pthread_mutex_lock(&g_api_mu); g_gen++; pthread_mutex_unlock(&g_api_mu); }
@@ -474,6 +478,7 @@ static void api_status(sb_t *o) {
          g_route ? "TAILNET" : "LAN", (g_px_port && g_ts_port) ? "true" : "false");
     sb_puts(o, ",\"smp\":"); sb_js(o, ver); sb_puts(o, ",\"smp_expected\":"); sb_js(o, c.smp_version);
     sb_puts(o, ",\"homebrew_dir\":"); sb_js(o, c.homebrew_dir);
+    sb_puts(o, ",\"catalog_etag\":"); sb_js(o, g_catalog_etag);
     sb_f(o, ",\"free_mb\":{\"data\":%lld,\"ext0\":%lld,\"ext1\":%lld,\"usb0\":%lld},\"min_free_mb\":%lld,\"fork\":\"%.16s\"}",
          dir_free("/data"), dir_free("/mnt/ext0"), dir_free("/mnt/ext1"), dir_free("/mnt/usb0"), c.min_free_mb, BM_FORK_SHA);
 }
@@ -713,6 +718,25 @@ static void api_handle(int s) {
         char v[16]; int n = get_q(query, "lines", v, sizeof v) ? atoi(v) : 200; if (n < 1) n = 1; if (n > 2000) n = 2000;
         api_log(&b, n); reply_json(s, 200, &b);
     }
+    else if (!strcmp(method, "GET") && (!strcmp(target, "/api/catalog") || !strcmp(target, "/api/covers.json") || !strncmp(target, "/api/cover/", 11))) {
+        // passed through from the host (LAN, else the tsnet proxy); a cover name is checked so nothing else on the host can be asked for
+        char hp[200] = ""; const char *ct = "application/json";
+        if (!strcmp(target, "/api/catalog")) snprintf(hp, sizeof hp, "/library.json");
+        else if (!strcmp(target, "/api/covers.json")) snprintf(hp, sizeof hp, "/covers.json");
+        else {
+            char kind[8] = "", name[40] = ""; const char *q = target + 11;
+            if (sscanf(q, "%7[a-z]/%39s", kind, name) == 2 && (!strcmp(kind, "thumb") || !strcmp(kind, "full") || !strcmp(kind, "sheet"))) {
+                size_t L = strlen(name); int ok = L > 4 && L <= 16 && !strcmp(name + L - 4, ".jpg");
+                for (size_t i = 0; ok && i + 4 < L; i++) if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'a' && name[i] <= 'f'))) ok = 0;
+                if (ok) { snprintf(hp, sizeof hp, "/covers/%s/%s", kind, name); ct = "image/jpeg"; }
+            }
+        }
+        conf_t c; read_conf(&c);
+        char *m = NULL; long long n = hp[0] ? api_get(&c, hp, &m, 20) : -2;
+        if (n >= 0) reply(s, 200, ct, m, (size_t)n);
+        else reply(s, 404, "text/plain", "not on the host", 15);
+        free(m);
+    }
     else if (!strcmp(method, "GET") && !strncmp(target, "/api/icon/", 10)) {
         char *png = NULL; size_t n = 0;
         if (api_icon(target + 10, &png, &n) == 0) reply(s, 200, "image/png", png, n);
@@ -736,8 +760,28 @@ static void api_handle(int s) {
 }
 
 // the host's list changed (a game added, rebuilt or removed on the drives): bump gen + wake the main loop for a pass now
+static void catalog_watch(const conf_t *c) {        // the ETag of the host's /library.json, from the response headers of a HEAD-like GET
+    int s = connect_ms(c->host, c->port, LAN_CONNECT_MS);
+    if (s < 0) return;
+    struct timeval tv = { 5, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    char req[300]; int rl = snprintf(req, sizeof req, "GET /library.json HTTP/1.0\r\nHost: %s\r\nIf-None-Match: \"%s\"\r\nConnection: close\r\n\r\n", c->host, g_catalog_etag);
+    if (write_all(s, req, (size_t)rl) != 0) { close(s); return; }
+    char h[2048]; ssize_t n = read(s, h, sizeof h - 1); close(s);   // the headers arrive in the first read; the body (if any) is dropped
+    if (n <= 0) return;
+    h[n] = 0;
+    char *e = strcasestr(h, "\nETag: \"");
+    if (!e) return;
+    char tag[64] = ""; sscanf(e + 8, "%63[^\"]", tag);
+    if (tag[0] && strcmp(tag, g_catalog_etag)) {
+        pthread_mutex_lock(&g_api_mu); snprintf(g_catalog_etag, sizeof g_catalog_etag, "%s", tag); g_gen++; pthread_mutex_unlock(&g_api_mu);
+        logf_("ui: the host's whole-library index is %s", tag);
+    }
+}
+
 static void api_watch(void) {
     conf_t c; read_conf(&c);
+    catalog_watch(&c);
     char *m = NULL;
     if (api_get(&c, "/games.txt", &m, 5) < 0) return;
     uint64_t h = fnv_key(m, strlen(m));                            // the daemon's FNV-1a (case-folded: fine for a change signal)

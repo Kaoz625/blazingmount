@@ -13,7 +13,7 @@ host/api_hooks.py are applied to a temp copy), runs it resident against a fake c
   5. hide / unhide (forget) / set / auto land in choices.tsv and mount.conf
   6. a game added on the drives shows up by itself (the API's watch) and, with auto on, gets built without any request
 """
-import hashlib, http.server, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
+import hashlib, http.server, urllib.error, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "console", "blazingmountd", "src")
@@ -41,6 +41,15 @@ class Fake(http.server.BaseHTTPRequestHandler):
         if p == "/games.txt":
             return self.send(("# key\ttid\tsize\tversion\tfw\tsdk\ttitle\n" + "".join(
                 "%s\t%s\t%d\t%s\t%s\t%s\t%s\n" % (g["key"], g["tid"], g["size"], g["version"], g["fw"], g["sdk"], g["title"]) for g in GAMES)).encode())
+        if p == "/library.json":
+            body = json.dumps({"count": 2, "games": [{"id": "aaaaaaaaaaaa", "title": "Alpha Game", "system": "ps5"},
+                                                     {"id": "bbbbbbbbbbbb", "title": "Old Thing", "system": "ps2"}]}).encode()
+            self.send_response(200); self.send_header("ETag", '"cat0001"'); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            return self.wfile.write(body)
+        if p == "/covers.json":
+            return self.send(b'{"covers":{"aaaaaaaaaaaa":{"page":0,"cell":0}}}', "application/json")
+        if p == "/covers/thumb/aaaaaaaaaaaa.jpg":
+            return self.send(b"\xff\xd8\xff" + b"0" * 100, "image/jpeg")
         if p == "/proven.tsv":
             return self.send(b"PPSA90001\tDIGI5\t2026-10-24 10:00\tplayed: New Game, walked\n")
         for g in GAMES:
@@ -128,6 +137,15 @@ def main():
         check(get("/api/icon/PPSA90001").startswith(b"\x89PNG"), "/api/icon from the host (cached after)")
         check(os.path.exists(os.path.join(b, "icons", "PPSA90001.png")), "icon cached on the console")
         check(any("pass:" in l for l in j("/api/log?lines=50")["lines"]), "/api/log tail")
+        check(wait(lambda: j("/api/status")["catalog_etag"] == "cat0001"), "status carries the host's whole-library ETag")
+        cat = j("/api/catalog")
+        check(cat["count"] == 2 and cat["games"][1]["system"] == "ps2", "/api/catalog passes the host's library.json through")
+        check(j("/api/covers.json")["covers"]["aaaaaaaaaaaa"]["page"] == 0, "/api/covers.json passed through")
+        check(get("/api/cover/thumb/aaaaaaaaaaaa.jpg").startswith(b"\xff\xd8"), "a cover JPEG passed through")
+        def code(path):
+            try: get(path); return 200
+            except urllib.error.HTTPError as e: return e.code
+        check(code("/api/cover/thumb/../../etc.jpg") == 404 and code("/api/cover/evil/aaaaaaaaaaaa.jpg") == 404, "a bad cover name is refused")
         # 2) refusals
         check(act("do=install&tid=PPSA90001", header=False)[0] == 403, "POST without X-BM-Request is refused")
         check(act("do=explode&tid=PPSA90001")[0] == 400, "unknown action refused")
