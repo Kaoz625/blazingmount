@@ -31,7 +31,7 @@
 
 class VulkanExample : public VulkanExampleBase
 {
-	static constexpr const char *kVersion = "0.2.0";
+	static constexpr const char *kVersion = "0.3.0";
 	static constexpr int kApiPort = 8094;
 
 	bm::App app;
@@ -291,7 +291,8 @@ private:
 			bm::Button b;
 		} buttons[] = { { PAD_CROSS, bm::kCross }, { PAD_CIRCLE, bm::kCircle }, { PAD_SQUARE, bm::kSquare },
 				{ PAD_TRIANGLE, bm::kTriangle }, { PAD_L1, bm::kL1 }, { PAD_R1, bm::kR1 },
-				{ 1u << 28, bm::kL2 }, { 1u << 29, bm::kR2 }, { PAD_OPTIONS, bm::kOptions } };
+				{ 1u << 28, bm::kL2 }, { 1u << 29, bm::kR2 }, { PAD_OPTIONS, bm::kOptions },
+				{ PAD_TOUCH_PAD, bm::kTouch } };
 		for (auto &e : buttons) {
 			if (pressed & e.mask) {
 				press(e.b);

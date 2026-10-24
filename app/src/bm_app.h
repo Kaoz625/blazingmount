@@ -14,7 +14,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "covers.h"
@@ -42,7 +44,7 @@ constexpr Rgba kGood = Hex(0x4CD48A), kWarn = Hex(0xFFB84D);
 constexpr float kHead = 40, kBody = 28, kMeta = 24, kWhisper = 21;
 constexpr float kGutter = 90, kEdge = 1830, kBottom = 1010;
 
-enum Button { kUp, kDown, kLeft, kRight, kCross, kCircle, kSquare, kTriangle, kL1, kR1, kL2, kR2, kOptions };
+enum Button { kUp, kDown, kLeft, kRight, kCross, kCircle, kSquare, kTriangle, kL1, kR1, kL2, kR2, kOptions, kTouch };
 
 struct Request {
   std::string method, path;   // "GET" / "POST"; path with its query
@@ -60,17 +62,46 @@ struct Setting {
 };
 
 enum class Tab { kLibrary, kActivity, kSettings };
-enum class Filter { kAll, kOnConsole, kNotInstalled, kProblems, kHidden, kPs5, kPs4, kCount };
-enum class Sort { kTitle, kSize, kState, kCount };
+enum class Filter { kAll, kOnConsole, kNotInstalled, kProblems, kHidden, kPs5, kPs4, kCount };   // (kept for the preview's old shots)
 
-inline const char* FilterName(Filter f) {
-  static const char* n[] = {"All", "On this console", "Not installed", "Needs attention", "Hidden", "PS5", "PS4"};
-  return n[int(f)];
+// The whole library (Markus 24 Oct: everything he owns, every system): L2/R2 walk the systems, OPTIONS what to show, TOUCH PAD grid/list
+enum class Group { kAll, kPs5, kPs4, kPs3, kPs2, kPsClassic, kSwitch, kNintendo, kXbox, kPc, kSega, kRetro, kMobile, kCount };
+enum class Show { kEverything, kPlayable, kOnDrives, kOnConsole, kNotOnDrives, kAttention, kHidden, kCount };
+inline const char* GroupName(Group g) {
+  static const char* n[] = {"All", "PS5", "PS4", "PS3", "PS2", "PS1 / PSP / Vita", "Switch", "Nintendo", "Xbox", "PC", "Sega", "Retro", "Mobile"};
+  return n[int(g)];
 }
-inline const char* SortName(Sort s) {
-  static const char* n[] = {"Title", "Size", "Status"};
+inline const char* ShowName(Show s) {
+  static const char* n[] = {"Everything I own", "Playable now", "On my drives", "On this console", "Not on my drives", "Needs attention", "Hidden"};
   return n[int(s)];
 }
+inline Group GroupOf(const std::string& sys, const std::string& family) {
+  if (sys == "ps5") return Group::kPs5;
+  if (sys == "ps4") return Group::kPs4;
+  if (sys == "ps3") return Group::kPs3;
+  if (sys == "ps2") return Group::kPs2;
+  if (sys == "ps1" || sys == "psp" || sys == "vita") return Group::kPsClassic;
+  if (sys == "switch" || sys == "switch2") return Group::kSwitch;
+  if (family == "Nintendo") return Group::kNintendo;
+  if (family == "Xbox") return Group::kXbox;
+  if (family == "PC") return Group::kPc;
+  if (family == "Sega") return Group::kSega;
+  if (family == "Mobile") return Group::kMobile;
+  return Group::kRetro;
+}
+
+// One game of the library: an entry of the host's /library.json, joined (by title id) to this console's PS5 row when it has one
+struct Item {
+  std::string id, title, system, sysLabel, family, how, plays, ids, firstPath, firstType, drive;
+  long long size = 0;
+  int files = 0;
+  bool compressed = false, verified = false, streamable = false;
+  int game = -1;            // index into the console's /api/library rows (-1: not a PS5 game this console tracks)
+  Group group = Group::kRetro;
+  Rgba colour{23, 16, 18, 255};
+  int page = -1, cell = -1; // where its cover is in the sprite sheets (-1: no cover)
+  std::string coverKey;     // the atlas key: the catalog id, or the title id (icon0) without a catalog
+};
 
 inline std::string Gb(long long bytes) {
   char t[32];
@@ -108,6 +139,14 @@ inline Badge BadgeOf(const Game& g) {
   if (s == "failed") return {"FAILED", 2};
   return {"?", 0};
 }
+inline Badge ItemBadge(const Item& it, const std::vector<Game>& games) {
+  if (it.game >= 0 && games[size_t(it.game)].state != "available" && games[size_t(it.game)].state != "queued") return BadgeOf(games[size_t(it.game)]);
+  if (it.streamable) return {"STREAMS", 1};
+  if (it.files) return {"ON MY DRIVES", 1};
+  if (it.how == "ps_plus") return {"PS PLUS", 0};
+  if (it.how == "licence") return {"LICENCE", 0};
+  return {"OWNED", 0};
+}
 inline int StateRank(const Game& g) {   // the Status sort: live first, then what needs you, then installed, then the rest
   static const char* order[] = {"playing", "building", "outdated", "orphan", "failed", "refused", "queued", "installed", "available", "needs_fw", "hidden"};
   for (int i = 0; i < 11; ++i) if (g.state == order[i]) return i;
@@ -130,6 +169,7 @@ class App {
       connected_ = true;
       status_ = v;
       gen_ = (unsigned long)v["gen"].ll();
+      if (v["catalog_etag"].str() != statusCatalogEtag_) statusCatalogEtag_ = v["catalog_etag"].str();
       const json::Value& rec = v["recent"];
       if (rec.size()) {
         const std::string last = rec[rec.size() - 1].str();
@@ -142,7 +182,7 @@ class App {
       hostOk_ = v["host_ok"].truthy();
       auto_ = v["auto"].truthy();
       consoleFw_ = v["console_fw"].str();
-      std::string keep = Focused() ? Focused()->tid : "";
+      std::string keep = FocusedItem() ? FocusedItem()->id : "";
       games_.clear();
       for (const auto& j : v["games"].items) {
         Game g;
@@ -155,7 +195,7 @@ class App {
         games_.push_back(std::move(g));
       }
       haveLibrary_ = true;
-      Rebuild(keep);
+      RebuildItems(keep);
     } else if (Base(path) == "/api/settings") {
       if (!ok) return;
       auto_ = v["auto"].truthy();
@@ -167,6 +207,27 @@ class App {
       if (!ok) return;
       log_.clear();
       for (const auto& l : v["lines"].items) log_.push_back(l.str());
+    } else if (Base(path) == "/api/catalog") {
+      if (!ok) { catalogTried_ = true; return; }
+      catalog_ = std::move(v);
+      catalogEtag_ = statusCatalogEtag_;
+      catalogTried_ = true;
+      RebuildItems(FocusedItem() ? FocusedItem()->id : "");
+    } else if (Base(path) == "/api/covers.json") {
+      if (!ok) return;
+      sheetCells_.clear();
+      coverIx_ = std::move(v);
+      RebuildItems(FocusedItem() ? FocusedItem()->id : "");
+    } else if (path.rfind("/api/cover/sheet/", 0) == 0) {
+      const int page = std::atoi(path.c_str() + 17);
+      auto it = sheetCells_.find(page);
+      if (code == 200 && it != sheetCells_.end()) covers_.PutSheet(it->second, body);
+      else if (it != sheetCells_.end()) for (auto& c2 : it->second) covers_.Failed(c2.first);
+    } else if (path.rfind("/api/cover/full/", 0) == 0) {
+      const std::string id = path.substr(16, path.size() - 16 - 4);
+      if (code == 200) covers_.PutFocus(id, body);
+      if (fullTried_.size() > 256) fullTried_.clear();
+      fullTried_.push_back(id);
     } else if (path.rfind("/api/icon/", 0) == 0) {
       const std::string tid = path.substr(10);
       if (code == 200 && !body.empty()) covers_.Put(tid, body); else covers_.Failed(tid);
@@ -186,7 +247,7 @@ class App {
       return;
     }
     switch (tab_) {
-      case Tab::kLibrary: PressLibrary(b); break;
+      case Tab::kLibrary: if (b == kTouch) { grid_ = !grid_; top_ = 0; return; } PressLibrary(b); break;
       case Tab::kActivity: PressActivity(b); break;
       case Tab::kSettings: PressSettings(b); break;
     }
@@ -200,18 +261,12 @@ class App {
       Ask("GET", "/api/library"); nextLibrary_ = now + 0.5;
     }
     if (connected_ && tab_ == Tab::kSettings && settingsGen_ != gen_ && !Inflight("/api/settings")) Ask("GET", "/api/settings");
-    if (connected_ && tab_ == Tab::kLibrary) {   // covers for the rows on screen and the focused game, two at a time
-      int busy = 0;
-      for (const auto& f : inflight_) busy += f.rfind("/api/icon/", 0) == 0;
-      for (int i = top_ - 2; i < top_ + kRowsVisible + 4 && busy < 2; ++i) {
-        if (i < 0 || i >= int(view_.size())) continue;
-        const std::string& tid = games_[size_t(view_[size_t(i)])].tid;
-        const std::string p = "/api/icon/" + tid;
-        if (covers_.Known(tid) || Inflight(p)) continue;
-        Ask("GET", p);
-        ++busy;
-      }
+    // the whole library (host /library.json through the payload): at start, and again when its ETag moves (drives / owned list changed)
+    if (connected_ && !Inflight("/api/catalog") && ((!catalogTried_) || (!statusCatalogEtag_.empty() && statusCatalogEtag_ != catalogEtag_))
+        && now >= nextCatalog_) {
+      Ask("GET", "/api/catalog"); Ask("GET", "/api/covers.json"); nextCatalog_ = now + 10.0;
     }
+    if (connected_ && tab_ == Tab::kLibrary) RequestCovers(now);
     if (connected_ && tab_ == Tab::kActivity && now >= nextLog_ && !Inflight("/api/log")) { Ask("GET", "/api/log?lines=80"); nextLog_ = now + 2.0; }
   }
   std::vector<Request> TakeRequests() { std::vector<Request> r; r.swap(out_); return r; }
@@ -236,23 +291,35 @@ class App {
   const std::vector<int>& visible() const { return view_; }
   Tab tab() const { return tab_; }
   bool connected() const { return connected_; }
-  void SetFilter(Filter f) { filter_ = f; Rebuild(""); }
+  void SetFilter(Filter) {}
+  void SetGroup(Group g) { group_ = g; sel_ = 0; RebuildView(""); }
+  void SetShow(Show v) { show_ = v; sel_ = 0; RebuildView(""); }
+  void SetGrid(bool g) { grid_ = g; }
+  size_t itemCount() const { return items_.size(); }
   bool confirming() const { return confirm_.active; }
   Covers& covers() { return covers_; }
 
  private:
   // ---------------------------------------------------------------- state
   Covers covers_;
-  std::vector<Game> games_;
-  std::vector<int> view_;        // games_ indices after filter + sort
+  std::vector<Game> games_;      // this console's PS5 rows (/api/library)
+  std::vector<Item> items_;      // the whole library (catalog joined with games_), or games_ alone without a catalog
+  std::vector<int> view_;        // items_ indices after group + show
+  int groupCount_[int(Group::kCount)] = {};
+  json::Value catalog_, coverIx_;
+  std::map<int, std::vector<std::pair<std::string, int>>> sheetCells_;   // sheet page -> (cover id, cell)
+  std::vector<std::string> fullTried_;
+  std::string catalogEtag_, statusCatalogEtag_, focusId_;
+  bool catalogTried_ = false, grid_ = true;
+  double nextCatalog_ = 0, focusSince_ = 0;
+  Group group_ = Group::kAll;
+  Show show_ = Show::kEverything;
   std::vector<Setting> settings_;
   std::vector<std::string> log_;
   json::Value status_;
   std::vector<Request> out_;
   std::vector<std::string> inflight_;
   Tab tab_ = Tab::kLibrary;
-  Filter filter_ = Filter::kAll;
-  Sort sort_ = Sort::kTitle;
   int sel_ = 0, top_ = 0, setSel_ = 0, logScroll_ = 0;
   unsigned long gen_ = 0, libGen_ = ~0ul, settingsGen_ = 0;
   bool connected_ = false, haveLibrary_ = false, hostOk_ = true, auto_ = true, seenStatus_ = false;
@@ -271,53 +338,149 @@ class App {
     Ask("POST", "/api/action?do=" + what + (tid.empty() ? "" : "&tid=" + tid) + extra);
   }
   void Toast(const std::string& t) { toast_ = t; toastUntil_ = now_ + 5.0; }
-  const Game* Focused() const { return sel_ >= 0 && sel_ < int(view_.size()) ? &games_[size_t(view_[size_t(sel_)])] : nullptr; }
+  const Item* FocusedItem() const { return sel_ >= 0 && sel_ < int(view_.size()) ? &items_[size_t(view_[size_t(sel_)])] : nullptr; }
+  const Game* Focused() const { const Item* it = FocusedItem(); return it && it->game >= 0 ? &games_[size_t(it->game)] : nullptr; }
 
   static std::string Lower(std::string s) { for (char& ch : s) if (ch >= 'A' && ch <= 'Z') ch = char(ch + 32); return s; }
-  bool Passes(const Game& g) const {
-    switch (filter_) {
-      case Filter::kAll: return true;
-      case Filter::kOnConsole: return g.local != "none";
-      case Filter::kNotInstalled: return g.local == "none" && g.choice != "skip";
-      case Filter::kProblems: return IsProblem(g);
-      case Filter::kHidden: return g.choice == "skip";
-      case Filter::kPs5: return g.platform == "PS5";
-      case Filter::kPs4: return g.platform == "PS4";
+  static Rgba ParseColour(const std::string& h) {
+    if (h.size() != 7 || h[0] != '#') return Rgba{23, 16, 18, 255};
+    const uint32_t v = uint32_t(std::strtoul(h.c_str() + 1, nullptr, 16));
+    return Rgba{uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v), 255};
+  }
+  // catalog + this console's rows -> items_ (one per game); then the view
+  void RebuildItems(const std::string& keepId) {
+    items_.clear();
+    std::unordered_map<std::string, int> byTid;
+    for (size_t i = 0; i < games_.size(); ++i) byTid[games_[i].tid] = int(i);
+    std::vector<char> used(games_.size(), 0);
+    const json::Value& cov = coverIx_["covers"];
+    std::unordered_map<std::string, const json::Value*> covBy;
+    for (const auto& f : cov.fields) covBy[f.first] = &f.second;
+    sheetCells_.clear();
+    for (const auto& j : catalog_["games"].items) {
+      Item it;
+      it.id = j["id"].str(); it.title = j["title"].str(); it.system = j["system"].str(); it.family = j["family"].str();
+      it.how = j["how"].str(); it.plays = j["plays"].str();
+      for (const auto& x : j["ids"].items) { if (!it.ids.empty()) it.ids += ", "; it.ids += x.str(); }
+      const json::Value& files = j["files"];
+      it.files = int(files.size());
+      if (it.files) {
+        it.firstPath = files[size_t(0)]["path"].str(); it.firstType = files[size_t(0)]["type"].str(); it.drive = files[size_t(0)]["drive"].str();
+        it.compressed = files[size_t(0)]["compressed"].truthy(); it.verified = files[size_t(0)]["verified"].truthy(); it.size = files[size_t(0)]["size"].ll();
+      }
+      const json::Value& st = j["stream"];
+      it.streamable = st.ok() && !st["key"].str().empty();
+      std::string tid = st.ok() ? st["tid"].str() : "";
+      auto g = tid.empty() ? byTid.end() : byTid.find(tid);
+      if (g == byTid.end()) for (const auto& x : j["ids"].items) if ((g = byTid.find(x.str())) != byTid.end()) break;
+      if (g != byTid.end() && it.system == "ps5") { it.game = g->second; used[size_t(g->second)] = 1; }
+      it.group = GroupOf(it.system, it.family);
+      auto c2 = covBy.find(it.id);
+      if (c2 != covBy.end()) {
+        it.colour = ParseColour((*c2->second)["colour"].str());
+        if ((*c2->second)["cover"].truthy()) {
+          it.page = int((*c2->second)["page"].ll()); it.cell = int((*c2->second)["cell"].ll());
+          sheetCells_[it.page].push_back({it.id, it.cell});
+          it.coverKey = it.id;
+        }
+      }
+      if (it.coverKey.empty() && it.game >= 0) it.coverKey = games_[size_t(it.game)].tid;   // icon0 from the payload
+      items_.push_back(std::move(it));
+    }
+    for (size_t i = 0; i < games_.size(); ++i) {   // this console's games the catalog does not have (or no catalog at all)
+      if (used[i]) continue;
+      const Game& g = games_[i];
+      Item it;
+      it.id = g.tid; it.title = g.title; it.system = g.platform == "PS4" ? "ps4" : "ps5"; it.family = "PlayStation"; it.how = "on_drive";
+      it.plays = "PS5: streams with BlazingMount"; it.ids = g.tid; it.files = g.onDrives ? 1 : 0; it.firstPath = g.file;
+      it.firstType = g.format; it.compressed = g.compressed; it.size = g.size; it.streamable = !g.key.empty(); it.game = int(i);
+      it.group = it.system == "ps4" ? Group::kPs4 : Group::kPs5; it.coverKey = g.tid;
+      items_.push_back(std::move(it));
+    }
+    RebuildView(keepId);
+  }
+  bool Passes(const Item& it, Group grp) const {
+    if (grp != Group::kAll && it.group != grp) return false;
+    const Game* g = it.game >= 0 ? &games_[size_t(it.game)] : nullptr;
+    switch (show_) {
+      case Show::kEverything: return !(g && g->choice == "skip");
+      case Show::kPlayable: return it.streamable || it.files > 0 || (g && g->local != "none");
+      case Show::kOnDrives: return it.files > 0 || it.streamable;
+      case Show::kOnConsole: return g && g->local != "none";
+      case Show::kNotOnDrives: return it.files == 0 && !it.streamable;
+      case Show::kAttention: return g && IsProblem(*g);
+      case Show::kHidden: return g && g->choice == "skip";
       default: return true;
     }
   }
-  int Count(Filter f) const { Filter keep = filter_; const_cast<App*>(this)->filter_ = f; int n = 0; for (const auto& g : games_) n += Passes(g); const_cast<App*>(this)->filter_ = keep; return n; }
-  void Rebuild(const std::string& keepTid) {
+  void RebuildView(const std::string& keepId) {
     view_.clear();
-    for (size_t i = 0; i < games_.size(); ++i) if (Passes(games_[i])) view_.push_back(int(i));
-    std::stable_sort(view_.begin(), view_.end(), [&](int a, int b2) {
-      const Game &x = games_[size_t(a)], &y = games_[size_t(b2)];
-      if (sort_ == Sort::kSize && x.size != y.size) return x.size > y.size;
-      if (sort_ == Sort::kState && StateRank(x) != StateRank(y)) return StateRank(x) < StateRank(y);
-      return Lower(x.title) < Lower(y.title);
-    });
-    if (!keepTid.empty())
-      for (size_t i = 0; i < view_.size(); ++i) if (games_[size_t(view_[i])].tid == keepTid) sel_ = int(i);
+    for (int k = 0; k < int(Group::kCount); ++k) groupCount_[k] = 0;
+    for (size_t i = 0; i < items_.size(); ++i) {
+      if (Passes(items_[i], Group::kAll)) { ++groupCount_[0]; ++groupCount_[int(items_[i].group)]; }
+      if (Passes(items_[i], group_)) view_.push_back(int(i));
+    }
+    if (!keepId.empty())
+      for (size_t i = 0; i < view_.size(); ++i) if (items_[size_t(view_[i])].id == keepId) sel_ = int(i);
     sel_ = std::clamp(sel_, 0, std::max(0, int(view_.size()) - 1));
+  }
+  // covers: the sheets of the rows on screen plus one row ahead (two requests at a time), the full cover after 0.35 s of focus
+  void RequestCovers(double now) {
+    int busy = 0;
+    for (const auto& f : inflight_) busy += f.rfind("/api/cover/", 0) == 0 || f.rfind("/api/icon/", 0) == 0;
+    const int cols = grid_ ? kCols : 1, rows = grid_ ? kGridRows : kRowsVisible;
+    const int first = std::max(0, (top_ - 1) * cols), last = std::min(int(view_.size()), (top_ + rows + 1) * cols);
+    for (int i = first; i < last && busy < 2; ++i) {
+      const Item& it = items_[size_t(view_[size_t(i)])];
+      if (it.coverKey.empty() || covers_.Known(it.coverKey)) continue;
+      std::string p = it.page >= 0 ? "/api/cover/sheet/" + std::to_string(it.page) + ".jpg" : "/api/icon/" + it.coverKey;
+      if (Inflight(p)) continue;
+      Ask("GET", p);
+      ++busy;
+    }
+    const Item* f = FocusedItem();
+    const std::string fid = f ? f->id : "";
+    if (fid != focusId_) { focusId_ = fid; focusSince_ = now; }
+    if (f && f->page >= 0 && now - focusSince_ > 0.35 && covers_.focusId() != f->id &&
+        std::find(fullTried_.begin(), fullTried_.end(), f->id) == fullTried_.end()) {
+      std::string p = "/api/cover/full/" + f->id + ".jpg";
+      if (!Inflight(p)) Ask("GET", p);
+    }
   }
 
   // ---------------------------------------------------------------- library controls
   static constexpr float kListTop = 212, kRowH = 88, kRowGap = 8;
   static constexpr int kRowsVisible = 8;
+  static constexpr int kCols = 5, kGridRows = 3;                  // the cover grid: 5 across, 3 rows on screen
+  static constexpr float kCard = 184, kPitchX = 204, kPitchY = 262;
   void PressLibrary(Button b) {
     const int n = int(view_.size());
-    if (b == kUp && sel_ > 0) --sel_;
-    if (b == kDown && sel_ + 1 < n) ++sel_;
-    if (b == kLeft) sel_ = std::max(0, sel_ - kRowsVisible);
-    if (b == kRight) sel_ = std::min(std::max(0, n - 1), sel_ + kRowsVisible);
+    const int step = grid_ ? kCols : 1, page = grid_ ? kCols * kGridRows : kRowsVisible;
+    if (b == kUp) sel_ = sel_ - step >= 0 ? sel_ - step : sel_;
+    if (b == kDown) sel_ = std::min(n - 1, sel_ + step);
+    if (grid_ && b == kLeft && sel_ > 0) --sel_;
+    if (grid_ && b == kRight && sel_ + 1 < n) ++sel_;
+    if (!grid_ && b == kLeft) sel_ = std::max(0, sel_ - page);
+    if (!grid_ && b == kRight) sel_ = std::min(std::max(0, n - 1), sel_ + page);
     if (b == kL2 || b == kR2) {
-      int f = (int(filter_) + (b == kR2 ? 1 : int(Filter::kCount) - 1)) % int(Filter::kCount);
-      std::string keep = Focused() ? Focused()->tid : "";
-      filter_ = Filter(f); sel_ = 0; Rebuild(keep);
+      group_ = Group((int(group_) + (b == kR2 ? 1 : int(Group::kCount) - 1)) % int(Group::kCount));
+      sel_ = 0; top_ = 0; RebuildView("");
     }
-    if (b == kOptions) { std::string keep = Focused() ? Focused()->tid : ""; sort_ = Sort((int(sort_) + 1) % int(Sort::kCount)); Rebuild(keep); }
+    if (b == kOptions) {
+      std::string keep = FocusedItem() ? FocusedItem()->id : "";
+      show_ = Show((int(show_) + 1) % int(Show::kCount)); top_ = 0; RebuildView(keep);
+    }
+    sel_ = std::clamp(sel_, 0, std::max(0, n - 1));
+    const int rowsVis = grid_ ? kGridRows : kRowsVisible, row = grid_ ? sel_ / kCols : sel_;
+    top_ = std::clamp(top_, std::max(0, row - rowsVis + 1), row);
+    const Item* it = FocusedItem();
     const Game* g = Focused();
-    if (!g) return;
+    if (!it) return;
+    if (!g) {
+      if (b == kCross || b == kTriangle || b == kSquare)
+        Toast(it->plays.empty() ? it->title + ": nothing plays it yet" : it->title + " plays on " + it->plays);
+      return;
+    }
     if (b == kCross) {
       if (g->state == "playing") Toast(g->title + " is running: close it first");
       else if (g->local == "starter") Ask_("remove", *g, "Remove " + g->title + "?",
@@ -333,8 +496,6 @@ class App {
       if (g->choice == "skip") { Act("unhide", g->tid); Toast("Showing " + g->title + " again"); }
       else { Act("hide", g->tid); Toast("Hidden: " + g->title + " will not be built"); }
     }
-    top_ = std::clamp(top_, sel_ - kRowsVisible + 1, sel_);
-    top_ = std::max(0, top_);
   }
   void Ask_(const std::string& action, const Game& g, const std::string& title, const std::string& body, const std::string& yes) {
     confirm_ = {true, action, g.tid, title, body, yes};
@@ -493,114 +654,163 @@ class App {
     b.Text(960, 650, t, St(kMeta, c::kTextDim), Align::kCentre);
   }
 
-  // ---------------------------------------------------------------- Library
+  // ---------------------------------------------------------------- Library: everything he owns
+  void Art(Batch& b, const Item& it, float x0, float y0, float x1, float y1, float alpha, bool big) {
+    float uv[4];
+    if (big && covers_.UvFocus(it.id, uv)) { b.Image(x0, y0, x1, y1, uv, alpha); return; }
+    if (!it.coverKey.empty() && covers_.Uv(it.coverKey, uv)) { b.Image(x0, y0, x1, y1, uv, alpha); return; }
+    Round(b, x0, y0, x1, y1, 12, Rgba{uint8_t(it.colour.r / 2), uint8_t(it.colour.g / 2), uint8_t(it.colour.b / 2), 255});   // the placeholder: its colour
+    const float sz = std::min(kHead, (y1 - y0) * 0.36f);
+    b.Text((x0 + x1) / 2, b.TopForCentre((y0 + y1) / 2, sz), Initials(it.title).c_str(), St(std::max(20.0f, sz), c::kTextDim), Align::kCentre);
+  }
+
   void DrawLibrary(Batch& b) {
-    // filter chips (L2 / R2), sort (OPTIONS)
-    float x = kGutter;
-    b.Text(x, 140, "{L2}", St(kMeta, c::kTextDim));
-    x += 56;
-    for (int i = 0; i < int(Filter::kCount); ++i) {
-      char t[64];
-      std::snprintf(t, sizeof t, "%s  %d", FilterName(Filter(i)), Count(Filter(i)));
-      const bool on = int(filter_) == i;
-      TextStyle st = St(kMeta, on ? c::kTextHi : c::kTextDim);
-      const float w = b.Width(t, st) + 32;
-      if (on) Outline(b, x, 132, x + w, 180, 16, 3, c::kAccent, c::kBg);
-      else Outline(b, x, 132, x + w, 180, 16, 2, c::kLine, c::kBg);
-      b.Text(x + 16, b.TopForCentre(156, st.size), t, st);
-      x += w + 12;
+    // system chips (L2 / R2), scrolled so the chosen one is on screen; what to show (OPTIONS); grid/list (TOUCH PAD)
+    char showT[80];
+    std::snprintf(showT, sizeof showT, "{START} %s   {SELECT} %s", ShowName(show_), grid_ ? "List" : "Grid");
+    const float showW = b.Width(showT, St(kMeta, c::kTextDim));
+    b.Text(kEdge, 140, showT, St(kMeta, c::kTextDim), Align::kRight);
+    const float chipsR = kEdge - showW - 72;
+    std::vector<float> w; w.resize(size_t(Group::kCount));
+    char t[64];
+    for (int i = 0; i < int(Group::kCount); ++i) {
+      std::snprintf(t, sizeof t, "%s  %d", GroupName(Group(i)), groupCount_[i]);
+      w[size_t(i)] = b.Width(t, St(kMeta, c::kTextDim)) + 32;
     }
-    b.Text(x + 4, 140, "{R2}", St(kMeta, c::kTextDim));
-    char sortT[48];
-    std::snprintf(sortT, sizeof sortT, "{START} Sort: %s", SortName(sort_));
-    b.Text(kEdge, 140, sortT, St(kMeta, c::kTextDim), Align::kRight);
+    float before = 0;
+    for (int i = 0; i < int(group_); ++i) before += w[size_t(i)] + 12;
+    const float room = chipsR - (kGutter + 56);
+    const float shift = std::max(0.0f, before + w[size_t(group_)] - room * 0.7f);
+    b.Text(kGutter, 140, "{L2}", St(kMeta, c::kTextDim));
+    float x = kGutter + 56 - shift;
+    for (int i = 0; i < int(Group::kCount); ++i) {
+      std::snprintf(t, sizeof t, "%s  %d", GroupName(Group(i)), groupCount_[i]);
+      const float x1 = x + w[size_t(i)];
+      if (x >= kGutter + 56 - 1 && x1 <= chipsR) {
+        const bool on = int(group_) == i;
+        TextStyle st = St(kMeta, on ? c::kTextHi : groupCount_[i] ? c::kTextDim : Hex(0x55555A));
+        if (on) Outline(b, x, 132, x1, 180, 16, 3, c::kAccent, c::kBg);
+        else Outline(b, x, 132, x1, 180, 16, 2, c::kLine, c::kBg);
+        b.Text(x + 16, b.TopForCentre(156, st.size), t, st);
+      }
+      x = x1 + 12;
+    }
+    b.Text(chipsR + 12, 140, "{R2}", St(kMeta, c::kTextDim));
 
     const float listR = 1110;
-    if (!haveLibrary_) { b.Text(kGutter, kListTop + 20, "Reading the library...", St(kBody, c::kTextDim)); return; }
-    if (view_.empty()) {
-      b.Text(kGutter, kListTop + 20, filter_ == Filter::kAll ? "No games on the drives yet" : "Nothing here", St(kBody, c::kTextDim));
-      return;
-    }
-    top_ = std::clamp(top_, std::max(0, sel_ - kRowsVisible + 1), sel_);
-    for (int i = 0; i < kRowsVisible && top_ + i < int(view_.size()); ++i) {
-      const int idx = top_ + i;
-      const Game& g = games_[size_t(view_[size_t(idx)])];
-      const bool f = idx == sel_;
-      const float y0 = kListTop + i * (kRowH + kRowGap), y1 = y0 + kRowH;
-      if (f) Round(b, kGutter, y0, listR, y1, 16, c::kFocusFill);
-      // the plate (cover art comes in v0.2: docs/UI-DESIGN.md)
-      float uv[4];
-      if (covers_.Uv(g.tid, uv)) b.Image(kGutter + 12, y0 + 10, kGutter + 80, y1 - 10, uv, f ? 1.0f : 0.65f);   // DESIGN-V2 2.6 artwork opacity
-      else {
-        Round(b, kGutter + 12, y0 + 10, kGutter + 80, y1 - 10, 12, f ? Hex(0x9E2830) : c::kSurfaceHi);
-        b.Text(kGutter + 46, b.TopForCentre((y0 + y1) / 2, kMeta), Initials(g.title).c_str(), St(kMeta, f ? c::kTextHi : c::kTextDim), Align::kCentre);
-      }
-      const Rgba under = f ? c::kFocusFill : c::kBg;
-      const Badge bd = BadgeOf(g);
-      float pl = Pill(b, listR - 16, (y0 + y1) / 2, bd.text, f && bd.tone != 3 ? 0 : bd.tone, under);
-      if (!g.proof.empty()) pl = Pill(b, pl - 10, (y0 + y1) / 2, "PLAYED", f ? 0 : 1, under);
-      const float tx = kGutter + 104, tw = pl - 20 - tx;
-      b.Text(tx, y0 + 9, Fit(b, g.title, St(kBody, f ? c::kTextHi : c::kText), tw).c_str(), St(kBody, f ? c::kTextHi : c::kText));
-      std::string meta = g.tid + "  \xC2\xB7  " + g.platform + "  \xC2\xB7  ." + g.format + (g.compressed ? " compressed" : "") + "  \xC2\xB7  " + Gb(g.size);
-      if (!g.fw.empty()) meta += "  \xC2\xB7  FW " + g.fw;
-      b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
-    }
+    if (!haveLibrary_ && items_.empty()) { b.Text(kGutter, kListTop + 20, "Reading the library...", St(kBody, c::kTextDim)); return; }
+    if (view_.empty()) { b.Text(kGutter, kListTop + 20, "Nothing here", St(kBody, c::kTextDim)); return; }
+    if (grid_) DrawGrid(b); else DrawList(b, listR);
     // scroll position
-    if (int(view_.size()) > kRowsVisible) {
-      const float h = kRowsVisible * (kRowH + kRowGap) - kRowGap;
-      const float th = std::max(40.0f, h * kRowsVisible / view_.size());
-      const float ty = kListTop + (h - th) * (float(top_) / std::max(1, int(view_.size()) - kRowsVisible));
+    const int rows = grid_ ? (int(view_.size()) + kCols - 1) / kCols : int(view_.size()), vis = grid_ ? kGridRows : kRowsVisible;
+    if (rows > vis) {
+      const float h = kBottom - kListTop;
+      const float th = std::max(40.0f, h * vis / rows);
+      const float ty = kListTop + (h - th) * (float(top_) / std::max(1, rows - vis));
       b.Rect(listR + 14, kListTop, listR + 18, kListTop + h, c::kLine);
       b.Rect(listR + 12, ty, listR + 20, ty + th, c::kAccent);
     }
     DrawDetail(b);
   }
 
+  void DrawGrid(Batch& b) {
+    const int rowSel = sel_ / kCols;
+    top_ = std::clamp(top_, std::max(0, rowSel - kGridRows + 1), rowSel);
+    for (int r = 0; r < kGridRows; ++r)
+      for (int col = 0; col < kCols; ++col) {
+        const int idx = (top_ + r) * kCols + col;
+        if (idx >= int(view_.size())) return;
+        const Item& it = items_[size_t(view_[size_t(idx)])];
+        const bool f = idx == sel_, rowFocused = (top_ + r) == rowSel;
+        const float x0 = kGutter + col * kPitchX + 10, y0 = kListTop + r * kPitchY, x1 = x0 + kCard, y1 = y0 + kCard;
+        if (f) Round(b, x0 - 6, y0 - 6, x1 + 6, y1 + 6, 16, c::kAccent);   // DESIGN-V2 2.6: the 6 px accent halo is the slot
+        Art(b, it, x0, y0, x1, y1, f ? 1.0f : rowFocused ? 0.65f : 0.45f, false);
+        if (f) b.Rect(x0, y1 + 12, x1, y1 + 18, c::kAccent);              // ...and the one accent bar under the artwork
+        const Badge bd = ItemBadge(it, games_);
+        if (bd.tone != 0 || f) Pill(b, x1 - 6, y1 - 26, bd.text, bd.tone, c::kBg);
+        b.Text(x0, y1 + 24, Fit(b, it.title, St(kMeta, f ? c::kTextHi : c::kText), kCard).c_str(), St(kMeta, f ? c::kTextHi : c::kText));
+        std::string sub = it.game >= 0 ? games_[size_t(it.game)].tid : SystemLabel(it);
+        b.Text(x0, y1 + 54, Fit(b, sub, St(kWhisper, c::kTextDim, -0.03f), kCard).c_str(), St(kWhisper, c::kTextDim, -0.03f));
+      }
+  }
+
+  std::string SystemLabel(const Item& it) const {
+    for (const auto& sy : catalog_["systems"].items) if (sy["key"].str() == it.system) return sy["label"].str();
+    return it.system == "ps4" ? "PS4" : it.system == "ps5" ? "PS5" : it.system;
+  }
+
+  void DrawList(Batch& b, float listR) {
+    top_ = std::clamp(top_, std::max(0, sel_ - kRowsVisible + 1), sel_);
+    for (int i = 0; i < kRowsVisible && top_ + i < int(view_.size()); ++i) {
+      const int idx = top_ + i;
+      const Item& it = items_[size_t(view_[size_t(idx)])];
+      const Game* g = it.game >= 0 ? &games_[size_t(it.game)] : nullptr;
+      const bool f = idx == sel_;
+      const float y0 = kListTop + i * (kRowH + kRowGap), y1 = y0 + kRowH;
+      if (f) Round(b, kGutter, y0, listR, y1, 16, c::kFocusFill);
+      Art(b, it, kGutter + 12, y0 + 10, kGutter + 80, y1 - 10, f ? 1.0f : 0.65f, false);
+      const Rgba under = f ? c::kFocusFill : c::kBg;
+      const Badge bd = ItemBadge(it, games_);
+      float pl = Pill(b, listR - 16, (y0 + y1) / 2, bd.text, f && bd.tone != 3 ? 0 : bd.tone, under);
+      if (g && !g->proof.empty()) pl = Pill(b, pl - 10, (y0 + y1) / 2, "PLAYED", f ? 0 : 1, under);
+      const float tx = kGutter + 104, tw = pl - 20 - tx;
+      b.Text(tx, y0 + 9, Fit(b, it.title, St(kBody, f ? c::kTextHi : c::kText), tw).c_str(), St(kBody, f ? c::kTextHi : c::kText));
+      std::string meta = SystemLabel(it);
+      if (!it.ids.empty()) meta += "  \xC2\xB7  " + it.ids.substr(0, it.ids.find(','));
+      if (it.files) meta += "  \xC2\xB7  ." + it.firstType + (it.compressed ? " compressed" : "") + "  \xC2\xB7  " + Gb(it.size);
+      else meta += "  \xC2\xB7  not on my drives";
+      b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
+    }
+  }
+
   void Fact(Batch& b, float x, float& y, float w, const char* label, const std::string& value, Rgba col = c::kText) {
-    if (value.empty()) return;
+    if (value.empty() || y > kBottom - 150) return;
     b.Text(x, y, label, St(kWhisper, c::kTextDim));
     y = Wrap(b, x + 190, y - 3, w - 190, value, St(kMeta, col, -0.03f), 2, 34) + 6;
   }
 
   void DrawDetail(Batch& b) {
+    const Item* it = FocusedItem();
+    if (!it) return;
     const Game* g = Focused();
-    if (!g) return;
     const float x0 = 1158, y0 = kListTop, x1 = kEdge, y1 = kBottom;
     Round(b, x0, y0, x1, y1, 16, c::kSurface);
     const float px = x0 + 32, pw = x1 - x0 - 64;
-    // header: plate + title
-    float uv[4];
-    if (covers_.Uv(g->tid, uv)) b.Image(px, y0 + 32, px + 136, y0 + 168, uv);
-    else {
-      Round(b, px, y0 + 32, px + 136, y0 + 168, 16, c::kSurfaceHi);
-      b.Text(px + 68, b.TopForCentre(y0 + 100, kHead), Initials(g->title).c_str(), St(kHead, c::kTextDim), Align::kCentre);
-    }
-    float ty = Wrap(b, px + 160, y0 + 36, pw - 160, g->title, St(kHead - 4, c::kTextHi), 2, 50);
-    const Badge bd = BadgeOf(*g);
-    Pill(b, px + 160 + b.Width(bd.text, St(kMeta - 2, c::kText)) + 28, std::max(ty + 26, y0 + 140), bd.text, bd.tone, c::kSurface);
-    float y = y0 + 200;
+    Art(b, *it, px, y0 + 32, px + 200, y0 + 232, 1.0f, true);   // the full cover once it has been focused a moment
+    float ty = Wrap(b, px + 224, y0 + 36, pw - 224, it->title, St(kHead - 4, c::kTextHi), 3, 50);
+    const Badge bd = ItemBadge(*it, games_);
+    Pill(b, px + 224 + b.Width(bd.text, St(kMeta - 2, c::kText)) + 28, std::max(ty + 26, y0 + 200), bd.text, bd.tone, c::kSurface);
+    float y = y0 + 264;
     b.Rect(px, y - 14, px + pw, y - 12, c::kLine);
-    Fact(b, px, y, pw, "Title ID", g->tid + "   " + g->platform + (g->version.empty() ? "" : "   v" + g->version));
-    Fact(b, px, y, pw, "On the drives", g->onDrives ? g->file : "not on the drives");
-    Fact(b, px, y, pw, "File type", g->format.empty() ? "" : "." + g->format + (g->compressed ? "  (compressed)" : "  (not compressed)") + "   " + Gb(g->size));
-    Fact(b, px, y, pw, "Needs FW", g->fw.empty() ? "" : g->fw + "   (this console " + consoleFw_ + ")", g->state == "needs_fw" ? c::kAccent : c::kText);
-    std::string here = g->local == "starter" ? "Streaming starter" : g->local == "full" ? "Full copy" : g->local == "image" ? "Image file" : "Not installed";
-    if (!g->localPath.empty()) here += ": " + g->localPath;
-    if (g->pinned) here += "  (pinned: never auto-updated)";
-    Fact(b, px, y, pw, "On this console", here, g->local == "none" ? c::kTextDim : c::kGood);
-    if (g->local == "starter") Fact(b, px, y, pw, "Streams over", status_["route"].str() == "TAILNET" ? "Tailnet (away from home)" : "Home network (LAN)");
-    Fact(b, px, y, pw, "Played", g->proof.empty() ? "no proof yet" : g->proof, g->proof.empty() ? c::kTextDim : c::kGood);
-    if (!g->reason.empty()) Fact(b, px, y, pw, g->build == "done" ? "Last build" : "Why", g->reason, g->build == "done" ? c::kText : c::kAccent);
-    if (g->choice == "skip") Fact(b, px, y, pw, "Your choice", "Hidden: never built", c::kTextDim);
-    else if (g->choice == "want") Fact(b, px, y, pw, "Your choice", "Wanted", c::kText);
-    // the buttons this game has
+    const char* how = it->how == "owned" ? "Owned" : it->how == "ps_plus" ? "PS Plus (yours while Plus is on)" : it->how == "licence" ? "Licence on DIGI5"
+                    : it->how == "free" ? "Free with the console" : it->how == "package" ? "Installed from a package" : "On my drives";
+    Fact(b, px, y, pw, "System", SystemLabel(*it) + (it->ids.empty() ? "" : "   " + it->ids.substr(0, 40)));
+    Fact(b, px, y, pw, "Yours", how);
+    if (it->files) {
+      std::string f = it->firstPath + "   ." + it->firstType + (it->compressed ? " (compressed)" : " (not compressed)") + (it->verified ? ", verified" : "")
+                    + (it->size ? "   " + Gb(it->size) : "");
+      if (it->files > 1) f += "   +" + std::to_string(it->files - 1) + " more";
+      Fact(b, px, y, pw, "On my drives", f, c::kGood);
+    } else Fact(b, px, y, pw, "On my drives", it->streamable ? "streamed from the drives" : "not yet", it->streamable ? c::kGood : c::kTextDim);
+    Fact(b, px, y, pw, "Plays on", it->plays);
+    if (g) {
+      Fact(b, px, y, pw, "Needs FW", g->fw.empty() ? "" : g->fw + "   (this console " + consoleFw_ + ")", g->state == "needs_fw" ? c::kAccent : c::kText);
+      std::string here = g->local == "starter" ? "Streaming starter" : g->local == "full" ? "Full copy" : g->local == "image" ? "Image file" : "Not installed";
+      if (!g->localPath.empty()) here += ": " + g->localPath;
+      if (g->pinned) here += "  (pinned)";
+      Fact(b, px, y, pw, "This console", here, g->local == "none" ? c::kTextDim : c::kGood);
+      Fact(b, px, y, pw, "Played", g->proof.empty() ? "no proof yet" : g->proof, g->proof.empty() ? c::kTextDim : c::kGood);
+      if (!g->reason.empty()) Fact(b, px, y, pw, g->build == "done" ? "Last build" : "Why", g->reason, g->build == "done" ? c::kText : c::kAccent);
+    }
     std::string hint;
-    if (g->local == "starter" && g->state != "playing") hint = "{CROSS} Remove   ";
-    else if (g->local == "none" && g->state != "needs_fw" && g->state != "building") hint = "{CROSS} Install   ";
-    if (g->local == "starter" && g->onDrives && g->state != "playing") hint += "{TRIANGLE} Rebuild   ";
-    hint += g->choice == "skip" ? "{SQUARE} Show" : "{SQUARE} Hide";
+    if (g) {
+      if (g->local == "starter" && g->state != "playing") hint = "{CROSS} Remove   ";
+      else if (g->local == "none" && g->state != "needs_fw" && g->state != "building") hint = "{CROSS} Install   ";
+      if (g->local == "starter" && g->onDrives && g->state != "playing") hint += "{TRIANGLE} Rebuild   ";
+      hint += g->choice == "skip" ? "{SQUARE} Show" : "{SQUARE} Hide";
+    } else hint = it->plays.empty() ? "" : "Plays on " + it->plays;
     b.Rect(px, y1 - 88, px + pw, y1 - 86, c::kLine);
-    b.Text(px, y1 - 68, hint.c_str(), St(kMeta, c::kText));
+    b.Text(px, y1 - 68, Fit(b, hint, St(kMeta, c::kText), pw).c_str(), St(kMeta, c::kText));
   }
 
   // ---------------------------------------------------------------- Activity

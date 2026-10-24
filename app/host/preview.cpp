@@ -42,6 +42,13 @@ struct Rig {
         std::string file = base == "/api/status" ? "status.json" : base == "/api/library" ? "library.json" : base == "/api/settings" ? "settings.json"
                          : base == "/api/log" ? "log.json" : "";
         if (offline) { app.OnResponse(r.path, 0, ""); continue; }
+        if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0) {   // BM_HOSTDATA: the host's files
+          const char* d = std::getenv("BM_HOSTDATA");
+          std::string rel = base == "/api/catalog" ? "library.json" : base == "/api/covers.json" ? "covers.json" : r.path.substr(11);
+          std::string data = d ? Read(std::string(d) + "/" + rel) : "";
+          app.OnResponse(r.path, data.empty() ? 404 : 200, data);
+          continue;
+        }
         if (r.path.rfind("/api/icon/", 0) == 0) {   // covers: BM_ICONS=<dir of TID.png> (never committed: game art)
           const char* d = std::getenv("BM_ICONS");
           std::string png = d ? Read(std::string(d) + "/" + r.path.substr(10) + ".png") : "";
@@ -103,6 +110,11 @@ int main(int argc, char** argv) {
   if (on("08-activity")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(2.5); bad += Shot(font, r, out + "/08-activity"); }
   if (on("09-settings")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kL1); r.Wait(0.5); for (int i = 0; i < 5; ++i) r.Press(kDown); r.Press(kRight); bad += Shot(font, r, out + "/09-settings"); }
   if (on("10-not-running")) { Rig r; r.dir = fx; r.offline = true; r.Wait(0); r.Wait(3); bad += Shot(font, r, out + "/10-not-running"); }
+  if (on("11-all-grid")) { Rig r; r.dir = fx; r.Wait(0); r.Wait(1); for (int i = 0; i < 6; ++i) r.Press(kRight); r.Wait(1); bad += Shot(font, r, out + "/11-all-grid"); }
+  if (on("12-ps2-grid")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kR2); r.Press(kDown); r.Press(kRight); r.Wait(1); bad += Shot(font, r, out + "/12-ps2-grid"); }
+  if (on("13-nintendo-grid")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 7; ++i) r.Press(kR2); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/13-nintendo-grid"); }
+  if (on("14-on-drives-list")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kOptions); r.Press(kOptions); r.Press(kTouch); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/14-on-drives-list"); }
+  if (on("15-retro-grid")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 11; ++i) r.Press(kR2); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/15-retro-grid"); }
   std::printf(bad ? "%d FAIL\n" : "ALL SHOTS OK\n", bad);
   return bad ? 1 : 0;
 }
