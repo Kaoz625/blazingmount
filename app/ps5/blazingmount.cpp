@@ -31,7 +31,7 @@
 
 class VulkanExample : public VulkanExampleBase
 {
-	static constexpr const char *kVersion = "0.1.0";
+	static constexpr const char *kVersion = "0.1.1";
 	static constexpr int kApiPort = 8094;
 
 	bm::App app;
@@ -80,23 +80,66 @@ class VulkanExample : public VulkanExampleBase
 		return out;
 	}
 
+	// This console's own LAN address (a UDP "connect" sends nothing; getsockname tells the route's source address)
+	static uint32_t lanAddress()
+	{
+		int u = socket(AF_INET, SOCK_DGRAM, 0);
+		if (u < 0) {
+			return 0;
+		}
+		sockaddr_in to{};
+		to.sin_family = AF_INET;
+		to.sin_port = htons(9);
+		to.sin_addr.s_addr = htonl(0xC0A80101);  // 192.168.1.1: any address off the box picks the LAN route
+		sockaddr_in me{};
+		socklen_t ml = sizeof me;
+		uint32_t ip = 0;
+		if (connect(u, reinterpret_cast<sockaddr *>(&to), sizeof to) == 0 && getsockname(u, reinterpret_cast<sockaddr *>(&me), &ml) == 0) {
+			ip = me.sin_addr.s_addr;
+		}
+		close(u);
+		return ip;
+	}
+
+	// 127.0.0.1 first; when a title may not reach loopback, the console's own LAN address (said once in klog)
+	static int connectApi()
+	{
+		static std::atomic<int> route{ 0 };   // 0 loopback, 1 LAN address
+		for (int k = 0; k < 2; k++) {
+			const int r = (route + k) % 2;
+			const uint32_t ip = r == 0 ? htonl(INADDR_LOOPBACK) : lanAddress();
+			if (!ip) {
+				continue;
+			}
+			int s = socket(AF_INET, SOCK_STREAM, 0);
+			if (s < 0) {
+				return -1;
+			}
+			timeval tv{ 3, 0 };
+			setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+			setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+			sockaddr_in sa{};
+			sa.sin_family = AF_INET;
+			sa.sin_port = htons(kApiPort);
+			sa.sin_addr.s_addr = ip;
+			if (connect(s, reinterpret_cast<sockaddr *>(&sa), sizeof sa) == 0) {
+				if (r != route) {
+					route = r;
+					say("api: reaching blazingmountd at %s:%d", r ? inet_ntoa(sa.sin_addr) : "127.0.0.1", kApiPort);
+				}
+				return s;
+			}
+			close(s);
+		}
+		return -1;
+	}
+
 	// One HTTP/1.0 request to the payload on this console. code 0 = nothing answered (the payload is not running).
 	static Answer fetch(const bm::Request &r)
 	{
 		Answer a{ r.path, 0, "" };
-		int s = socket(AF_INET, SOCK_STREAM, 0);
+		int s = connectApi();
 		if (s < 0) {
-			return a;
-		}
-		timeval tv{ 3, 0 };
-		setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-		setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-		sockaddr_in sa{};
-		sa.sin_family = AF_INET;
-		sa.sin_port = htons(kApiPort);
-		sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		if (connect(s, reinterpret_cast<sockaddr *>(&sa), sizeof sa) != 0) {
-			close(s);
 			return a;
 		}
 		std::string req = r.method + " " + r.path + " HTTP/1.0\r\nHost: 127.0.0.1\r\nX-BM-Request: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
