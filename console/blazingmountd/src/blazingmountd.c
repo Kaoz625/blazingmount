@@ -217,6 +217,7 @@ typedef struct {
     char host[64]; int port;
     int fw_override;                 // console FW in hundredths (1360 = 13.60), 0 = ask the kernel
     long long max_starter_mb, min_free_mb, big_starter_mb, big_free_mb;
+    long long disk_cache_mb; int conns, readahead_kb, cache_mb_ram;
     int poll_secs;
     char smp_version[64];
     int n_only, n_skip, n_first;
@@ -236,6 +237,10 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   first <TID or TID@bytes>   built before every other game, in the order listed (e.g. the games this console had before a wipe)
 //   max_starter_mb 2048 | min_free_mb 51200 | poll_secs 600
 //   smp_version 1.7beta6-fix2   the ShadowMount+ build our starters are proven with (checked every pass, see check_smp)
+//   conns 8 | readahead_kb 2048 | cache_mb_ram 32        link speed settings written into every game's cfg (= mkgame 24 Oct)
+//   disk_cache_mb 0      the link's console-disk cache per game, a FIXED cap (the link never grows past it). Default 0 = off (Markus
+//                        24 Oct: no console cache that grows; must work on consoles with no M.2 and little space). When set, it is used
+//                        only while /data has >= big_free_mb free and the cap still leaves min_free_mb; otherwise that game gets 0.
 //   big_starter_mb 12000 | big_free_mb 204800   a starter may be up to big_starter_mb when /data has >= big_free_mb free
 //                                              (GoT 9.8 GB, CoD 3.6 GB: Markus wants them back, 23 Oct)
 // The v1 one-line form "<ip> <port>" pointed at the old catalog server: its ip is kept, its port ignored (imgserve is :4451).
@@ -244,6 +249,7 @@ static void read_conf(conf_t *c) {
     strcpy(c->host, BM_DEFAULT_HOST); c->port = BM_DEFAULT_PORT;
     c->max_starter_mb = 2048; c->min_free_mb = 50 * 1024; c->poll_secs = 600;
     c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
+    c->disk_cache_mb = 0; c->conns = 8; c->readahead_kb = 2048; c->cache_mb_ram = 32;
     strcpy(c->smp_version, BM_SMP_VERSION);
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
@@ -269,6 +275,10 @@ static void read_conf(conf_t *c) {
         else if (!strcmp(k, "min_free_mb")) c->min_free_mb = atoll(v);
         else if (!strcmp(k, "big_starter_mb")) c->big_starter_mb = atoll(v);
         else if (!strcmp(k, "big_free_mb")) c->big_free_mb = atoll(v);
+        else if (!strcmp(k, "disk_cache_mb")) c->disk_cache_mb = atoll(v);
+        else if (!strcmp(k, "conns") && atoi(v) > 0) c->conns = atoi(v);
+        else if (!strcmp(k, "readahead_kb")) c->readahead_kb = atoi(v);
+        else if (!strcmp(k, "cache_mb_ram") && atoi(v) > 0) c->cache_mb_ram = atoi(v);
         else if (!strcmp(k, "smp_version")) snprintf(c->smp_version, sizeof c->smp_version, "%s", v);
         else if (!strcmp(k, "poll_secs") && atoi(v) >= 30) c->poll_secs = atoi(v);
         else logf_("mount.conf: unknown setting '%s' ignored", k);
@@ -478,7 +488,7 @@ static int starts(const char *s, const char *p) { return !strncmp(s, p, strlen(p
 
 // mkgame.KEEP_LOCAL_EXT (case as mkgame) + blazingmount-starter.MODULE_EXT (any case)
 static int keep_local(const char *p) {
-    static const char *ext[] = { ".pgm", ".prx", ".sprx", ".elf", ".self", ".index", ".crc", 0 };
+    static const char *ext[] = { ".pgm", ".prx", ".sprx", ".elf", ".self", ".index", ".crc", ".cache", ".utoc", 0 };   // = mkgame 24 Oct
     static const char *mod[] = { ".prx", ".sprx", ".elf", ".self", 0 };
     for (int i = 0; ext[i]; i++) if (ends_with(p, ext[i], 0)) return 1;
     for (int i = 0; mod[i]; i++) if (ends_with(p, mod[i], 1)) return 1;
@@ -632,13 +642,21 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
     }
     // 6) the link config, BEFORE the folder appears (ShadowMount may register the tile at once)
     {
-        long long whole = (remote_bytes + (1 << 20) - 1) >> 20, dc = whole < 2048 ? 2048 : (whole > 16384 ? 16384 : whole);
+        long long dc = c->disk_cache_mb;                              // fixed cap, never sized from the game: see read_conf
+        if (dc > 0 && (fm < c->big_free_mb || fm - dc < c->min_free_mb)) {
+            logf_("  disk cache off for this game: /data has %lld MB free (needs >= %lld MB and %lld MB left after the %lld MB cache)",
+                  fm, c->big_free_mb, c->min_free_mb, dc);
+            dc = 0;
+        }
         size_t cap2 = 4096 + (size_t)nr * 300; char *cfg = malloc(cap2); size_t o = 0;
         o += (size_t)snprintf(cfg + o, cap2 - o, "# blazingmountd %s v%s: %s, %d files read from %s (%.1f GB)\nmode remote\nserver %s %d\nbase /t/%s\n",
                               BM_VERSION, g->version, name, nr, c->host, remote_bytes / 1e9, c->host, c->port, g->key);
         for (int i = 0; i < nr; i++) o += (size_t)snprintf(cfg + o, cap2 - o, "file %lld %s\n", big[i]->size, big[i]->path);
-        o += (size_t)snprintf(cfg + o, cap2 - o, "block_kb 256\ncache_mb 32\nconns 4\nasync 1\ntimeout_ms 8000\nstats_s 2\nlog_first 60\n"
-                              "trace_opens 100\ntrace_io 60\ntrace_apr 60\ndisk_cache_mb %lld\n", dc);
+        // same keys and order as mkgame.cfg_text (24 Oct): dc_queue only when not the link's default 16 (we never set it)
+        o += (size_t)snprintf(cfg + o, cap2 - o, "block_kb 256\ncache_mb %d\nconns %d\nasync 1\ntimeout_ms 8000\nstats_s 2\nlog_first 60\n"
+                              "trace_opens 100\ntrace_io 60\ntrace_apr 60\n", c->cache_mb_ram, c->conns);
+        if (dc > 0) o += (size_t)snprintf(cfg + o, cap2 - o, "disk_cache_mb %lld\n", dc);
+        if (c->readahead_kb > 0) o += (size_t)snprintf(cfg + o, cap2 - o, "readahead_kb %d\n", c->readahead_kb);
         char lp[600], cfgp[700], tmp[720];
         snprintf(cfgp, sizeof cfgp, "%s/%s.cfg", P(lp, sizeof lp, LINK_DIR), g->tid);
         snprintf(tmp, sizeof tmp, "%s.tmp", cfgp);
