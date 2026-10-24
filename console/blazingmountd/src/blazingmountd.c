@@ -284,6 +284,7 @@ typedef struct {
     long long disk_cache_mb; int conns, readahead_kb, cache_mb_ram;
     int poll_secs;
     char smp_version[64];
+    char homebrew_dir[256];          // where starters go (default /data/homebrew; PHAT5: /mnt/ext1/homebrew = its M.2)
     int tsnet;                       // 1 = use the tsnet proxy fallback when one is found (default), 0 = never
     char proxy[64]; int proxy_port;  // explicit proxy (else /data/tailscale/config.json httpProxyAddr)
     char server_ts[64]; int server_ts_port;
@@ -304,6 +305,8 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   first <TID or TID@bytes>   built before every other game, in the order listed (e.g. the games this console had before a wipe)
 //   max_starter_mb 2048 | min_free_mb 51200 | poll_secs 600
 //   smp_version 1.7beta6-fix2   the ShadowMount+ build our starters are proven with (checked every pass, see check_smp)
+//   homebrew_dir /mnt/ext1/homebrew   where new starters go (default /data/homebrew). The staging folder is <parent>/blz-stage/bm on the
+//                        same drive (the final move is a rename), free space is checked there too.
 //   tsnet 1 | proxy 127.0.0.1 8888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
 //                        (/data/tailscale/config.json with "httpProxyAddr", or an explicit proxy line) the payload's own downloads AND every
 //                        game's link cfg fall back to that proxy when the LAN server does not answer (tsnet 0 = never)
@@ -321,6 +324,7 @@ static void read_conf(conf_t *c) {
     c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
     c->disk_cache_mb = 0; c->conns = 8; c->readahead_kb = 2048; c->cache_mb_ram = 32;
     strcpy(c->smp_version, BM_SMP_VERSION);
+    strcpy(c->homebrew_dir, HOMEBREW_DIR);
     c->tsnet = 1; strcpy(c->server_ts, BM_DEFAULT_TS_HOST); c->server_ts_port = 0;   // 0 = the imgserve port
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
@@ -351,6 +355,7 @@ static void read_conf(conf_t *c) {
         else if (!strcmp(k, "readahead_kb")) c->readahead_kb = atoi(v);
         else if (!strcmp(k, "cache_mb_ram") && atoi(v) > 0) c->cache_mb_ram = atoi(v);
         else if (!strcmp(k, "tsnet")) c->tsnet = atoi(v);
+        else if (!strcmp(k, "homebrew_dir") && v[0] == '/') snprintf(c->homebrew_dir, sizeof c->homebrew_dir, "%s", v);
         else if (!strcmp(k, "proxy") || !strcmp(k, "server_ts")) {
             char ip[64] = ""; int pt = 0;
             if (sscanf(line, "%*s %63s %d", ip, &pt) == 2 && pt > 0) {
@@ -626,7 +631,7 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
         size_t L = strlen(s); while (L && (s[L - 1] == ' ' || s[L - 1] == '\t')) s[--L] = 0;
         snprintf(name, sizeof name, "%s (%s)", s, g->tid);
     }
-    char dest[900], hb[600]; snprintf(dest, sizeof dest, "%s/%s", P(hb, sizeof hb, HOMEBREW_DIR), name);
+    char dest[900], hb[600]; snprintf(dest, sizeof dest, "%s/%s", P(hb, sizeof hb, c->homebrew_dir), name);
     if (exists(dest)) { snprintf(reason, rn, "folder already there"); return 0; }
 
     // 1) the file list
@@ -660,9 +665,15 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
     long long starter_bytes = total - remote_bytes;
     int rc = -1;
     char stage[900], sp[600];
-    snprintf(stage, sizeof stage, "%s/%s", P(sp, sizeof sp, STAGE_DIR), name);
+    char par[300], pp[600];
+    {   // stage on the same drive as the homebrew dir: <parent of homebrew_dir>/blz-stage/bm (= /data/blz-stage/bm by default)
+        snprintf(par, sizeof par, "%s", c->homebrew_dir);
+        char *sl = strrchr(par, '/'); if (sl && sl != par) *sl = 0; else strcpy(par, "/data");
+        char sd[400]; snprintf(sd, sizeof sd, "%s/blz-stage/bm", par);
+        snprintf(stage, sizeof stage, "%s/%s", P(sp, sizeof sp, sd), name);
+    }
     if (!has_eboot) { snprintf(reason, rn, "no eboot.bin in the image"); rc = 1; goto out; }
-    char dp[600]; long long fm = free_mb(P(dp, sizeof dp, "/data"));
+    long long fm = free_mb(P(pp, sizeof pp, par));                // the drive the starter lands on (the homebrew dir's parent exists)
     long long scap = c->max_starter_mb;                               // a bigger starter is fine on a console with lots of room
     if (scap > 0 && c->big_starter_mb > scap && fm >= c->big_free_mb) scap = c->big_starter_mb;
     if (scap > 0 && starter_bytes > scap * 1000000LL) {
@@ -888,8 +899,12 @@ int main(int argc, char **argv) {
     makedirs(P(p, sizeof p, "/data/blazing"));
     int lk = open(P(p, sizeof p, LOCK_PATH), O_RDWR | O_CREAT, 0644);
     if (lk >= 0 && flock(lk, LOCK_EX | LOCK_NB) != 0) { logf_("another blazingmountd is running: this one exits"); return 0; }
-    logf_("blazingmountd %s start (%s), fork %zu bytes sha256 %s", BM_VERSION, (argc > 1 && !strcmp(argv[1], "once")) ? "once" : "resident",
-          (size_t)bm_fork_len, BM_FORK_SHA);
+    logf_("blazingmountd %s start (%s) pid %d, fork %zu bytes sha256 %s", BM_VERSION, (argc > 1 && !strcmp(argv[1], "once")) ? "once" : "resident",
+          (int)getpid(), (size_t)bm_fork_len, BM_FORK_SHA);
+    {   // pid file: an update can stop exactly this process (pldmgr process_kill) instead of guessing among "payload.elf" entries
+        char pp[600], pb[32]; int n = snprintf(pb, sizeof pb, "%d\n", (int)getpid());
+        write_file(P(pp, sizeof pp, "/data/blazing/blazingmountd.pid"), pb, (size_t)n);
+    }
     if (argc > 1 && !strcmp(argv[1], "once")) return sync_once() == 0 ? 0 : 1;
     for (;;) {
         conf_t c; read_conf(&c);
