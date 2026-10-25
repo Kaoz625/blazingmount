@@ -6,6 +6,7 @@
     download-to-console.py verify  CONSOLE TID...              only the piece check of what was sent (needs payload 2.8)
     download-to-console.py switch  CONSOLE TID                 only the switch (everything sent and verified)
     download-to-console.py cancel  CONSOLE TID                 stop wanting it; deletes ONLY its staged files in incoming/
+    download-to-console.py put     CONSOLE FILE... --to DIR    any files (ROMs, ...) the same way: pieces checked, then renamed into DIR
     download-to-console.py status                              the journal, human-readable
 
 The contract is docs/DOWNLOAD-TO-CONSOLE.md. Markus, 24 Oct 2026, PHAT5 away on a phone hotspot: "is there a way to download
@@ -926,8 +927,94 @@ def finish(con, st, job, plan, args):
     if args.no_switch:
         log("%s: verified; --no-switch given" % plan["tid"])
         return True
-    do_switch(con, st, job, plan)
+    if plan["kind"] == "put":
+        do_place(con, st, job, plan)
+    else:
+        do_switch(con, st, job, plan)
     return True
+
+
+# ---------------------------------------------------------------- put: any files, same pieces and checks
+
+def make_put_plan(con, srcs, to, label, st=None):
+    st = st or con.status() or {}
+    to = to.rstrip("/")
+    drive = next((d for d in DRIVES if to.startswith(d + "/")), None)
+    if not drive:
+        raise SystemExit("refused: --to must be under one of %s" % ", ".join(DRIVES))
+    if drive == "/data" and ((st.get("free_mb") or {}).get("ext1") or 0) > 1:
+        raise SystemExit("refused: never /data on a console with an M.2 (use /mnt/ext1/...)")
+    files = []
+    for src in srcs:
+        if not os.path.isfile(src):
+            raise SystemExit("not a file: " + src)
+        n = os.path.basename(src)
+        files.append({"rel": n, "size": os.path.getsize(src), "src": os.path.abspath(src),
+                      "dest": "%s/blz-stage/incoming/put-%s/%s.part" % (drive, label, n)})
+    return {"tid": "put-" + label, "kind": "put", "title": "%d file%s to %s" % (len(files), "s" * (len(files) > 1), to), "to": to,
+            "drive": drive, "files": files, "total": sum(f["size"] for f in files), "console": con.name,
+            "min_free_mb": int(st.get("min_free_mb") or 51200)}
+
+
+def do_place(con, st, job, plan):
+    """Every verified file renamed from incoming/ into --to (same drive). A name already there is left alone and reported."""
+    c = con.ftp()
+    ftp_mkdirs(c, plan["to"])
+    undo = job.setdefault("undo", [])
+    kept = []
+    for f in plan["files"]:
+        target = "%s/%s" % (plan["to"], f["rel"])
+        if ftp_size(c, target) is not None:
+            kept.append(f["rel"])
+            log("%s: %s is already there: left as it is, the copy stays in %s" % (plan["tid"], target, f["dest"]))
+            continue
+        ftp_rename(c, f["dest"], target)
+        undo.append(["rename", target, f["dest"]])
+        save_state(st)
+        log("%s: in place -> %s (%s)" % (plan["tid"], target, gb(f["size"])))
+    c.quit()
+    job["state"] = "done"
+    job["msg"] = "in %s" % plan["to"] + (" (%d already there, not replaced)" % len(kept) if kept else "")
+    job["switched_at"] = int(time.time())
+    save_state(st)
+    hub("%s: %s on %s, every piece verified" % (plan["tid"], plan["title"], con.name))
+
+
+def cmd_put(args):
+    if not args.to:
+        raise SystemExit("put needs --to <console folder>")
+    con = Console(args.console)
+    label = args.label or re.sub(r"[^A-Za-z0-9._-]+", "-", args.to.rstrip("/").rsplit("/", 1)[-1])
+    key = "%s:put-%s" % (con.name, label)
+    if not lock_job(key):
+        raise SystemExit("put-%s: another run is working on it" % label)
+    st = load_state()
+    status = con.status() or {}
+    plan = make_put_plan(con, args.tid, args.to, label, status)
+    job = own_job(st, key, plan["tid"], con.name)
+    job.pop("can_verify", None)
+    job.update(title=plan["title"], kind="put", total=plan["total"], drive=plan["drive"], to=plan["to"])
+    if job.get("state") == "done":
+        log("%s: already done (%s)" % (plan["tid"], job.get("msg")))
+        return
+    c = con.ftp()
+    free = avbl_mb(c, plan["drive"]) or 0
+    c.quit()
+    need_mb = -(-plan["total"] // (1024 * 1024))
+    if free - need_mb < plan["min_free_mb"]:
+        job["state"], job["msg"] = "failed", "no space: %d MB free, %d MB needed, %d MB kept free" % (free, need_mb, plan["min_free_mb"])
+        save_state(st)
+        raise SystemExit(job["msg"])
+    log("%s: %s, %s, at ~%.2f MB/s about %s" % (plan["tid"], plan["title"], gb(plan["total"]), float(args.rate),
+                                                dur(plan["total"] / (float(args.rate) * 1e6))))
+    hub("%s START: %s, %s -> %s" % (plan["tid"], plan["title"], gb(plan["total"]), con.name))
+    rate, base = Rate(), 0
+    for f in plan["files"]:
+        send_file(con, st, job, f, rate, base, plan["total"], args)
+        base += f["size"]
+    job["done"], job["state"] = plan["total"], "verifying"
+    save_state(st)
+    finish(con, st, job, plan, args)
 
 
 def cmd_verify(args):
@@ -986,7 +1073,7 @@ def cmd_status(args):
 def main():
     global HUB
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=("plan", "get", "verify", "switch", "cancel", "status"))
+    ap.add_argument("cmd", choices=("plan", "get", "put", "verify", "switch", "cancel", "status"))
     ap.add_argument("console", nargs="?")
     ap.add_argument("tid", nargs="*")
     ap.add_argument("--rate", default="0.85", help="MB/s used for time estimates (measured 24 Oct away: 0.86)")
@@ -995,13 +1082,15 @@ def main():
     ap.add_argument("--while-playing", action="store_true", help="on-console copies run even while a game runs")
     ap.add_argument("--notice", action="store_true", help="a TV notice with size + time when a copy starts")
     ap.add_argument("--hub", default=HUB, help="team chat file for milestone lines")
+    ap.add_argument("--to", help="put: the console folder the files end up in (same drive as the staging)")
+    ap.add_argument("--label", help="put: the job's name (default: the last part of --to)")
     ap.add_argument("--every", type=float, default=30.0, help="progress line every N seconds")
     ap.add_argument("--cancel-file", default=os.path.join(HOME, "STOP"), help="stop cleanly when this file exists")
     args = ap.parse_args()
     HUB = args.hub
     if args.cmd != "status" and (not args.console or not args.tid):
         ap.error("CONSOLE and at least one TID please")
-    return {"plan": cmd_plan, "get": cmd_get, "verify": cmd_verify, "switch": cmd_switch, "cancel": cmd_cancel,
+    return {"plan": cmd_plan, "get": cmd_get, "put": cmd_put, "verify": cmd_verify, "switch": cmd_switch, "cancel": cmd_cancel,
             "status": cmd_status}[args.cmd](args)
 
 

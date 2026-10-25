@@ -400,6 +400,16 @@ def main():
               "Beta (FW 13.60 on 10.20): its overlay renamed back from blz-disabled")
         check(os.path.exists(os.path.join(ROOT, "data", "blz-parked", names["PPSA70002"])), "Beta: the /data copy is left alone (not the tool's to delete)")
 
+        # 5b) put: plain files (BlazingArch ROMs) with the same pieces and checks, then renamed into --to
+        roms = []
+        for i, n in enumerate(("Sonic Adventure DX (USA).rvz", "Tom Clancy's Splinter Cell (USA).rvz")):
+            roms.append(os.path.join(work, n))
+            open(roms[-1], "wb").write(rnd(2 * PIECE + 1000 * (i + 1), n))
+        code, out = run("put", con, *roms, "--to", "/mnt/ext1/BlazingArch/content/gamecube")
+        ok = all(same("/mnt/ext1/BlazingArch/content/gamecube/" + os.path.basename(r), r) for r in roms)
+        check(code == 0 and ok and job("put-gamecube").get("state") == "done", "put: ROMs checked and placed in --to" + ("" if ok else ": " + out[-700:]))
+        code, out = run("put", con, roms[0], "--to", "/data/homebrew/PPSA99171/content/gamecube")
+        check(code != 0 and "never /data" in out, "put: /data refused on a console with an M.2")
         # 6) refusals
         GAMES.append({"tid": "PPSA70005", "title": "Eps", "fw": "5.00", "size": 3 * PIECE, "key": "PPSA70005@%d" % (3 * PIECE), "name": "Eps (PPSA70005).ffpfsc"})
         open(os.path.join(src, "Eps (PPSA70005).ffpfsc"), "wb").write(rnd(3 * PIECE, "eps"))
