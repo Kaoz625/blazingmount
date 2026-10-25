@@ -130,9 +130,9 @@ download-to-console.py verify   CONSOLE TID...            only the piece check o
 download-to-console.py switch   CONSOLE TID               only the switch (everything sent and verified)                          [done]
 download-to-console.py cancel   CONSOLE TID               stop wanting it; deletes ONLY its staged files in incoming/              [done]
 download-to-console.py status                             the journal, human-readable                                               [done]
-download-to-console.py remove-local CONSOLE TID --confirm  back to streaming; deletes the local image (frees the space)           [next]
-download-to-console.py serve    [CONSOLE...]              the worker: answers the app (downloads.tsv), writes dl-status.tsv         [next]
-download-to-console.py prove    CONSOLE TID [--minutes 5] waits for the title to run, then counts imgserve requests for it         [next]
+download-to-console.py remove-local CONSOLE TID --confirm  back to streaming; deletes the local image (frees the space)           [done 25 Oct]
+download-to-console.py serve    [CONSOLE...]              the worker: answers the app (downloads.tsv), writes dl-status.tsv         [done]
+download-to-console.py prove    CONSOLE TID... [--minutes 5] waits for the title to run, then counts imgserve requests for it      [done 25 Oct]
 ```
 
 Built 24 Oct evening with the first three games (Smurfs 2, Samson, Galactic Racer) already copying, so it differs from the plan
@@ -233,6 +233,37 @@ Only for a copy the tool itself switched in, or an image in `homebrew` that matc
    on its next pass.
 5. `DELE` the image from `incoming/`. **The tool deletes only inside `<drive>/blz-stage/incoming/`.**
 
+As built (25 Oct 2026):
+
+- **The steps come from the switch's own journal** (`undo` in `jobs/<console>-<TID>.json`): each recorded rename is sorted into
+  OUT (the image -> `incoming/<name>.remove-<stamp>`, whatever it came from: sent, parked or copied on the console; the overlay
+  the switch restored -> its old `blz-disabled/` name; a folder game's real files -> their `.part` in `incoming/`) and BACK (cfg,
+  parked starter, 0-byte placeholders). An undo step it does not recognise = refused before any change. The plan is saved in the
+  job (`removal`) before the first rename, so a cut-off run resumes the same plan; every rename checks first (source there,
+  target not = do it; the reverse = done before; anything else = stop).
+- **No journal**: only an image in homebrew that IS the drives' image (name + size), with the newest parked starter
+  (`stub/<starter>-off-<stamp>`) and newest `cfg.off-*` brought back; with no parked starter the payload gets `install`
+  (it builds a new starter even with auto off) instead of `unhide`. Refused with the reason, nothing changed: a pkg install
+  ("an installed game: remove it in the PS5's Storage settings"), a folder copy with no cfg ("a full copy the download helper
+  did not make"), an image that is not the drives' copy, a title that still streams.
+- **ShadowMount first.** It keeps the FIRST copy it sees of a title, and it does nothing while a game runs (PHAT5, 25 Oct: the
+  RE2 switch at 09:50 was applied at 10:01:19, when 007 First Light closed). So the starter comes back only after a NEW
+  `[CACHE] source removed: <TID>` line (or `/user/app/<TID>/mount.lnk` gone). That wait has no limit while a game runs; after
+  10 idle minutes (`BM_DL_SMP_GONE_WAIT`) with no sign the OUT renames are reversed: the copy is back in homebrew and still
+  plays, state `failed` with the reason, the journal kept (`get` still sees it as on the console; asking again resumes).
+- An image game is `hide`-den while it changes (the payload must not build a starter in between), then `unhide`.
+- The job ends `removed` with `files`, `undo`, `switched_at` cleared (a later `download` is a fresh copy) and the old undo in
+  `history`. TV notice + hub line. `serve` runs it for the app's `remove_local` (`--confirm`: the app's own dialog asked).
+- `claim` (switch and remove alike) waits up to 30 min for another agent's lock instead of failing the run at its last step.
+
+### 5.5.1 `prove` (as built)
+
+Passive: it never launches anything. Waits (up to `--wait-hours`, default 12) until one of the titles runs (`ps5-status`),
+then counts imgserve.log + dirserve.log lines naming the title from the look before the launch until `--minutes` after.
+imgserve.log carries no client address, so another console running the same title in that window (checked every poll) makes
+the result INCONCLUSIVE (exit 3). 0 requests = PROVEN LOCAL: a line in `~/.blazing/games-proven.tsv`, `proven_at` in the job,
+hub line (exit 0). Any request = NOT LOCAL (exit 1). A title gone within a minute is a failed launch: it waits for the next one.
+
 ### 5.6 The worker (`serve`)
 
 - Runs in a visible mac1 Terminal (`window` writes `~/.blazing/download-local/download-local.command` and opens it).
@@ -275,8 +306,11 @@ Passive only: it never launches anything. It waits until the title runs, then co
   listing, a fake API): resume at a verified piece after a cut, a corrupt piece sent again, refusal of `/data` with an M.2,
   space refusal, switch renames + overlay from the starter's real files, remove-local deleting only in `incoming/`, a pkg
   install never deleted, cancel.
-- `host/test_download_e2e.py`: the tool against the REAL host-built payload (`BM_ROOT`) + the fake ftpsrv/websrv over the same
-  root: app request -> worker -> transfer -> `/api/sha256` verify -> switch -> `/api/library` shows `on_console`.
+  Since 25 Oct also remove-local (image, folder game, overlay back, ShadowMount silent -> put back, pkg + stranger's copy
+  refused, through `serve`, downloaded again after; every DELE checked to be in `incoming/`) and prove (proven, not local,
+  inconclusive, never ran): 55 checks.
+- `host/test_download_e2e.py` (NOT BUILT YET): the tool against the REAL host-built payload (`BM_ROOT`) + the fake ftpsrv/websrv
+  over the same root: app request -> worker -> transfer -> `/api/sha256` verify -> switch -> `/api/library` shows `on_console`.
 
 ## 8. Rollout
 

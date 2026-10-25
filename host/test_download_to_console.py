@@ -14,11 +14,17 @@ a connection cut mid-file -> resume from the console's .part; a corrupted piece 
 (no /api/sha256) -> sent but NOT switched, then `verify` + `switch` after the "update"; a folder game (dirserve files
 into the starter's 0-byte placeholders); a full copy on another drive -> SITE CPFR/CPTO + check + overlay back +
 switch; refusals (no space, a non-placeholder file in the way, a game running = waits); one run per job (lock).
+remove-local: an image (the starter back only after ShadowMount dropped the image), a folder game (placeholders back),
+an overlay back to blz-disabled, ShadowMount silent (everything put back, still plays; asked again finishes), a pkg install
+and a stranger's full copy refused, the app's request through serve, downloaded again after; nothing deleted outside
+incoming/. prove: 0 requests = PROVEN LOCAL + a games-proven line, a request = NOT LOCAL, the other console running it =
+inconclusive, never run = not proven.
 """
 import hashlib
 import http.server
 import json
 import os
+import re
 import shutil
 import socket
 import socketserver
@@ -32,7 +38,8 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "download-to-console.py")
 PIECE = 64 * 1024
-CFG = {"requests": [], "stor_rests": [], "sha_route": True, "drop_after": 0, "corrupt_at": -1, "free": 10 * 1024 ** 3, "running": "", "actions": []}
+CFG = {"requests": [], "stor_rests": [], "sha_route": True, "drop_after": 0, "corrupt_at": -1, "free": 10 * 1024 ** 3, "running": "", "actions": [],
+       "deletes": [], "smp_silent": False}
 
 
 def rnd(n, seed):
@@ -121,6 +128,7 @@ class FTP(socketserver.StreamRequestHandler):
                 self.rest = 0
                 self.reply("226 stored")
             elif cmd == "DELE":
+                CFG["deletes"].append(arg)
                 os.remove(p)
                 self.reply("226 deleted")                        # ftpsrv answers 226 to DELE
             elif cmd == "MKD":
@@ -138,6 +146,12 @@ class FTP(socketserver.StreamRequestHandler):
                 else:
                     os.rename(self.rnfr, p)
                     self.reply("250 renamed")
+                    # ShadowMount: something left homebrew (a starter at a switch, an image at a remove) -> one log line
+                    src = "/" + os.path.relpath(self.rnfr, ROOT)
+                    m = re.search(r"\((PPSA\d{5})\)", src)
+                    if m and os.path.dirname(src) == "/mnt/ext1/homebrew" and not CFG["smp_silent"]:
+                        with open(os.path.join(ROOT, "data", "shadowmount", "debug.log"), "a") as fh:
+                            fh.write("[%s]   [CACHE] source removed: %s (%s)\n" % (time.strftime("%H:%M:%S"), m.group(1), src))
             elif cmd == "AVBL":
                 self.reply("213 %d" % CFG["free"])
             elif cmd == "SITE":
@@ -254,7 +268,9 @@ def main():
         threading.Thread(target=s.serve_forever, daemon=True).start()
     # stand-ins: what runs (CFG["running"] via a file), the lock tools, the TV notice
     runfile = os.path.join(work, "running")
-    open(os.path.join(binp, "ps5-status"), "w").write('#!/bin/sh\nr=$(cat "%s" 2>/dev/null)\n[ -n "$r" ] && echo "X: RUNNING  $r  Game" || echo "X: IDLE"\n' % runfile)
+    # running-<name> answers for one console (the 'other' console of prove), else the shared file
+    open(os.path.join(binp, "ps5-status"), "w").write('#!/bin/sh\nf="%s-$1"; [ -f "$f" ] || f="%s"\nr=$(cat "$f" 2>/dev/null)\n'
+                                                      '[ -n "$r" ] && echo "X: RUNNING  $r  Game" || echo "X: IDLE"\n' % (runfile, runfile))
     for n in ("ps5-claim", "ps5-release"):
         open(os.path.join(binp, n), "w").write('#!/bin/sh\necho "$(basename $0) $*" >> "%s/claims.log"\n' % work)
     for n in os.listdir(binp):
@@ -267,7 +283,8 @@ def main():
                BM_DL_FTP_PORT=str(PORTS["ftp"]), BM_DL_WEB_PORT=str(PORTS["web"]), BM_DL_API_PORT=str(PORTS["api"]),
                BM_IMGSERVE="http://127.0.0.1:%d" % PORTS["img"], BM_DIRSERVE="http://127.0.0.1:%d" % PORTS["dir"],
                BM_DL_ROOTS=os.path.join(work, "drives"), BM_IMGSERVE_LOG=imglog, BLAZING_PS5_TOOLS=tools,
-               BM_DL_CONSOLE_FW="10.20", BM_DL_HUB="", BM_DL_SMP_WAIT="0")
+               BM_DL_CONSOLE_FW="10.20", BM_DL_HUB="", BM_DL_SMP_WAIT="0", BM_DL_POLL="0.2", BM_DL_SMP_GONE_WAIT="2",
+               BM_DL_PROVEN=os.path.join(work, "proven.tsv"), BM_DL_OTHERS="OTHER1", BM_DIRSERVE_LOG=os.path.join(work, "dirserve.log"))
 
     # the console: an M.2 with a homebrew, starters + their cfgs
     def mk(*parts):
@@ -430,6 +447,99 @@ def main():
         check(os.path.exists(os.path.join(home, "jobs", "127.0.0.1-PPSA70007.stop")), "serve: the app's cancel leaves the title's stop file")
         code, out = run("serve", con, "--once", "--poll", "1", timeout=60)
         check("download asked" not in out and code == 0, "serve: a request already handled is not run twice")
+
+        # 7) remove-local: back to streaming, the copy deleted (only in incoming/), every step from the switch's own journal
+        inc = os.path.join(ROOT, "mnt", "ext1", "blz-stage", "incoming")
+        stub = os.path.join(ROOT, "mnt", "ext1", "blz-stage", "stub")
+        code, out = run("remove-local", con, "PPSA70001")
+        check(code != 0 and "--confirm" in out and os.path.isfile(os.path.join(hb, names["PPSA70001"])), "remove-local: refused without --confirm, nothing changed")
+        CFG["actions"].clear()
+        code, out = run("remove-local", con, "PPSA70001", "--confirm")
+        j = job("PPSA70001")
+        check(code == 0 and j.get("state") == "removed" and not os.path.exists(os.path.join(hb, names["PPSA70001"])),
+              "Alpha: removed, the image is out of homebrew" + ("" if code == 0 else ": " + out[-900:]))
+        check(os.path.isfile(os.path.join(hb, "Alpha (PPSA70001)", "eboot.bin")) and os.path.isfile(os.path.join(link, "PPSA70001.cfg"))
+              and not any(n.startswith("Alpha (PPSA70001)-off-") for n in os.listdir(stub)), "Alpha: the starter + its cfg are back")
+        check(not any("Alpha" in n for n in os.listdir(inc)), "Alpha: the image deleted from incoming/ (space freed)")
+        check(CFG["actions"] == ["do=hide&tid=PPSA70001", "do=unhide&tid=PPSA70001"], "Alpha: hidden while it changed, shown again after: %s" % CFG["actions"])
+        check("ShadowMount let go" in out and out.index("ShadowMount let go") < out.index("Alpha (PPSA70001)-off-"),
+              "Alpha: the starter came back only after ShadowMount dropped the image")
+        check(not j.get("undo") and not j.get("files") and len(j.get("history", [])) == 1, "Alpha: journal reset (undo kept in history)")
+        check("local copy is removed" in open(os.path.join(work, "notices.log")).read(), "Alpha: TV notice")
+        # a folder game: real files out + deleted, 0-byte placeholders back, cfg back
+        code, out = run("remove-local", con, "PPSA70003", "--confirm")
+        gst_ok = all(os.path.getsize(os.path.join(gst, rel)) == 0 for rel in big)
+        check(code == 0 and gst_ok and job("PPSA70003").get("state") == "removed" and os.path.isfile(os.path.join(link, "PPSA70003.cfg")),
+              "Gamma (folder game): placeholders back, cfg back" + ("" if code == 0 else ": " + out[-900:]))
+        check(not [f for dp, _, fns in os.walk(os.path.join(inc, "PPSA70003-files")) for f in fns], "Gamma: the real files deleted from incoming/")
+        # the overlay the switch restored goes back to blz-disabled; the /data copy stays
+        code, out = run("remove-local", con, "PPSA70002", "--confirm")
+        check(code == 0 and not os.path.exists(os.path.join(hb, "backports", "PPSA70002"))
+              and os.path.isdir(os.path.join(ROOT, "mnt", "ext1", "blz-disabled", "PPSA70002-overlay-20261022-0838", "fakelib")),
+              "Beta: its overlay back in blz-disabled under its old name" + ("" if code == 0 else ": " + out[-900:]))
+        check(os.path.exists(os.path.join(ROOT, "data", "blz-parked", names["PPSA70002"])) and os.path.isdir(os.path.join(hb, "Beta (PPSA70002)")),
+              "Beta: starter back, the /data copy still left alone")
+        # ShadowMount never lets go -> everything back as it was, it still plays; a later run (it does let go) finishes
+        CFG["smp_silent"] = True
+        code, out = run("remove-local", con, "PPSA70004", "--confirm")
+        j = job("PPSA70004")
+        check(code != 0 and j.get("state") == "failed" and "ShadowMount" in j.get("msg", "") and same("/mnt/ext1/homebrew/" + names["PPSA70004"],
+              os.path.join(src, names["PPSA70004"])) and not os.path.exists(os.path.join(hb, "Delta (PPSA70004)")),
+              "Delta: ShadowMount silent -> copy put back in homebrew, starter still parked, failed with the reason")
+        code, out = run("get", con, "PPSA70004")
+        check("already on the console" in out and not any(n.startswith("Delta") for n in os.listdir(inc)), "Delta: a stopped remove is still a copy on the console (get sends nothing)")
+        CFG["smp_silent"] = False
+        code, out = run("remove-local", con, "PPSA70004", "--confirm")
+        check(code == 0 and job("PPSA70004").get("state") == "removed" and os.path.isdir(os.path.join(hb, "Delta (PPSA70004)")), "Delta: asked again -> removed")
+        # what is not the tool's: a pkg install, a full copy someone else made
+        mk("mnt", "ext1", "user", "app", "PPSA70009")
+        open(os.path.join(ROOT, "mnt", "ext1", "user", "app", "PPSA70009", "app.pkg"), "wb").write(b"p" * 1000)
+        code, out = run("remove-local", con, "PPSA70009", "--confirm")
+        check(code != 0 and "installed game" in job("PPSA70009").get("msg", "") and
+              os.path.getsize(os.path.join(ROOT, "mnt", "ext1", "user", "app", "PPSA70009", "app.pkg")) == 1000, "a pkg install is refused, untouched")
+        om = mk("mnt", "ext1", "homebrew", "Omega (PPSA70010)")
+        open(os.path.join(om, "eboot.bin"), "wb").write(b"real")
+        code, out = run("remove-local", con, "PPSA70010", "--confirm")
+        check(code != 0 and "did not make" in job("PPSA70010").get("msg", "") and os.path.isfile(os.path.join(om, "eboot.bin")),
+              "a full copy the tool did not make is refused, untouched")
+        # the app asks (through the payload) -> serve runs remove-local -> dl-status says removed
+        CFG["requests"] = [{"what": "remove_local", "tid": "PPSA70006", "at": 3000}]
+        code, out = run("serve", con, "--once", "--poll", "1", timeout=120)
+        lines = open(st6).read().splitlines() if os.path.exists(st6) else []
+        check(code == 0 and "remove_local asked" in out and any(l.startswith("job\tPPSA70006\tremoved\t") for l in lines)
+              and not os.path.exists(os.path.join(hb, n6)), "serve: the app's remove_local ran; dl-status says removed" + ("" if code == 0 else ": " + out[-700:]))
+        # removed, then downloaded again: a fresh copy, not 'already done'
+        code, out = run("get", con, "PPSA70001")
+        check(code == 0 and job("PPSA70001").get("state") == "done" and same("/mnt/ext1/homebrew/" + names["PPSA70001"], os.path.join(src, names["PPSA70001"])),
+              "Alpha: downloaded again after the remove" + ("" if code == 0 else ": " + out[-700:]))
+        bad = [d for d in CFG["deletes"] if "/blz-stage/incoming/" not in d and not d.startswith("/data/blazing/dl-status.tsv")]
+        check(not bad, "nothing outside blz-stage/incoming/ (and the worker's own dl-status.tsv) was ever deleted %s" % bad)
+
+        # 8) prove: passive; 0 imgserve requests for the title while it runs = PROVEN LOCAL
+        open(runfile, "w").write("PPSA70001")
+        open(runfile + "-OTHER1", "w").write("")
+        code, out = run("prove", con, "PPSA70001", "--minutes", "0.03", "--wait-hours", "0.01")
+        proven = os.path.join(work, "proven.tsv")
+        check(code == 0 and "PROVEN LOCAL" in out and os.path.exists(proven) and "PPSA70001\t127.0.0.1\t" in open(proven).read()
+              and job("PPSA70001").get("proven_at"), "prove: 0 requests -> PROVEN LOCAL, a games-proven line" + ("" if code == 0 else ": " + out[-500:]))
+        p = subprocess.Popen([sys.executable, "-I", TOOL, "prove", con, "PPSA70001", "--minutes", "0.05", "--wait-hours", "0.01"], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        outl = []
+        for line in p.stdout:                                    # a request once it counts (a timer races a loaded Mac)
+            outl.append(line)
+            if "counting requests" in line:
+                with open(imglog, "a") as fh:
+                    fh.write("12:00:00.000 GET PPSA70001@327680/eboot.bin range=0-1 -> 206 2 B 0 ms fast\n")
+        code, out = p.wait(), "".join(outl)
+        check(code == 1 and "NOT LOCAL" in out, "prove: an imgserve request for it while it runs -> NOT LOCAL" + ("" if code == 1 else ": " + out[-400:]))
+        open(runfile + "-OTHER1", "w").write("PPSA70001")
+        n0 = open(proven).read().count("\n")
+        code, out = run("prove", con, "PPSA70001", "--minutes", "0.03", "--wait-hours", "0.01")
+        check(code == 3 and "INCONCLUSIVE" in out and open(proven).read().count("\n") == n0, "prove: the other console runs it too -> inconclusive, no proof line")
+        code, out = run("prove", con, "PPSA70002", "--minutes", "0.03", "--wait-hours", "0.0005")
+        check(code == 3 and "did not run" in out, "prove: a title that never runs is not proven")
+        os.remove(runfile)
+        os.remove(runfile + "-OTHER1")
         # 6) refusals
         GAMES.append({"tid": "PPSA70005", "title": "Eps", "fw": "5.00", "size": 3 * PIECE, "key": "PPSA70005@%d" % (3 * PIECE), "name": "Eps (PPSA70005).ffpfsc"})
         open(os.path.join(src, "Eps (PPSA70005).ffpfsc"), "wb").write(rnd(3 * PIECE, "eps"))

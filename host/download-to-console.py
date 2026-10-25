@@ -7,6 +7,8 @@
     download-to-console.py switch  CONSOLE TID                 only the switch (everything sent and verified)
     download-to-console.py cancel  CONSOLE TID                 stop wanting it; deletes ONLY its staged files in incoming/
     download-to-console.py put     CONSOLE FILE... --to DIR    any files (ROMs, ...) the same way: pieces checked, then renamed into DIR
+    download-to-console.py remove-local CONSOLE TID --confirm  back to streaming: the starter back, the local copy deleted (frees it)
+    download-to-console.py prove   CONSOLE TID... [--minutes 5] passive: waits for the title to run, counts imgserve requests for it
     download-to-console.py serve   CONSOLE...                  the worker the app talks to: its requests -> runs, progress -> the console
     download-to-console.py status                              the journal, human-readable
 
@@ -37,6 +39,11 @@ THE SWITCH (never while that title runs; the console is claimed only for those s
           -> cfg -> .cfg.off-<stamp> -> TV notice. (The starter folder is the game; no ShadowMount change.)
 A rename never crosses drives. Nothing outside <drive>/blz-stage/incoming/ is ever deleted.
 
+REMOVE LOCAL COPY (the switch's own undo steps, from the journal): the image out of homebrew into incoming/ -> wait until
+ShadowMount let go of it (it keeps the FIRST copy it sees of a title: the starter must not come back before) -> starter + cfg
+back -> unhide -> the image deleted from incoming/. A pkg install is never touched. ShadowMount silent for 10 idle minutes =
+the copy goes back into homebrew and it still plays (nothing lost). Every step checks first, so a cut-off run resumes.
+
 Claude (dl-local), 24 Oct 2026, for Markus.
 """
 import argparse
@@ -63,6 +70,10 @@ IMGSERVE = os.environ.get("BM_IMGSERVE", "http://127.0.0.1:4451")
 DIRSERVE = os.environ.get("BM_DIRSERVE", "http://127.0.0.1:4452")
 ROOTS = (os.environ.get("BM_DL_ROOTS") or "/Volumes/Untitled:/Volumes/My Book").split(":")
 IMGLOG = os.environ.get("BM_IMGSERVE_LOG", os.path.expanduser("~/.blazing/imgserve/imgserve.log"))
+DIRLOG = os.environ.get("BM_DIRSERVE_LOG", os.path.expanduser("~/.blazing/imgserve/dirserve.log"))
+PROVEN = os.environ.get("BM_DL_PROVEN", os.path.expanduser("~/.blazing/games-proven.tsv"))
+POLL = float(os.environ.get("BM_DL_POLL") or 10)                # seconds between looks at ShadowMount / what runs
+SMP_GONE_WAIT = int(os.environ.get("BM_DL_SMP_GONE_WAIT") or 600)   # idle seconds ShadowMount gets to let go of an image
 TOOLS = os.environ.get("BLAZING_PS5_TOOLS", os.path.expanduser("~/NYCT/blazing-ps5/tools"))
 HUB = os.environ.get("BM_DL_HUB", "")          # a team chat file to post milestones to ("" = none)
 DATA_KEEP_MB = 55 * 1024                       # /data stops writes near 52 GiB free (memory ps5-data-stops-writes-near-52gib)
@@ -252,14 +263,19 @@ class Console:
 
     def running(self):
         """The title id running now ('' = none, None = unknown)."""
-        try:
-            out = subprocess.run(["ps5-status", self.name], capture_output=True, text=True, timeout=60).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        m = re.search(r"RUNNING\s+((?:PPSA|CUSA)\d{5})", out)
-        if m:
-            return m.group(1)
-        return "" if re.search(r"\b(IDLE|HOME)\b", out) else None
+        return running_on(self.name)
+
+
+def running_on(name):
+    """What a console (by name or IP) runs now, by ps5-status: a title id, '' = nothing, None = cannot tell."""
+    try:
+        out = subprocess.run(["ps5-status", name], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"RUNNING\s+((?:PPSA|CUSA)\d{5})", out)
+    if m:
+        return m.group(1)
+    return "" if re.search(r"\b(IDLE|HOME)\b", out) else None
 
 
 class NoVerify(Exception):
@@ -278,6 +294,21 @@ def ftp_size(f, path):
         p = line.split(None, 8)
         if len(p) == 9 and p[8] == base and not line.startswith("d"):
             return int(p[4])
+    return None
+
+
+def ftp_entry(f, path):
+    """'d' (a folder) or 'f' (a file) by LIST of the parent, None when absent."""
+    parent, base = path.rstrip("/").rsplit("/", 1)
+    lines = []
+    try:
+        f.retrlines("LIST " + parent, lines.append)
+    except ftplib.all_errors:
+        return None
+    for line in lines:
+        p = line.split(None, 8)
+        if len(p) == 9 and p[8] == base:
+            return "d" if line.startswith("d") else "f"
     return None
 
 
@@ -643,13 +674,23 @@ def wait_not_running(con, tid):
         time.sleep(120)
 
 
-def claim(con, why):
-    try:
-        r = subprocess.run(["ps5-claim", con.name, "dl-local", why], capture_output=True, text=True, timeout=60)
-        if r.returncode:
+def claim(con, why, wait=1800):
+    """The console's lock for a few seconds of renames. Held by another agent = wait for it (a copy that took hours must not
+    die at its last step), up to `wait` seconds."""
+    t0, said = time.monotonic(), False
+    while True:
+        try:
+            r = subprocess.run(["ps5-claim", con.name, "dl-local", why], capture_output=True, text=True, timeout=60)
+        except FileNotFoundError:
+            return
+        if not r.returncode:
+            return
+        if time.monotonic() - t0 > wait:
             raise SystemExit("the console is claimed by someone else: " + (r.stdout + r.stderr).strip()[:300])
-    except FileNotFoundError:
-        pass
+        if not said:
+            log("%s is claimed by someone else; waiting for it: %s" % (con.name, (r.stdout + r.stderr).strip()[:200]))
+            said = True
+        time.sleep(max(1.0, 3 * POLL))
 
 
 def release(con):
@@ -797,8 +838,8 @@ def cmd_get(args):
         plan = make_plan(con, tid, status)
         job = own_job(st, jkey(con, tid), tid, con.name)
         job.update(title=plan["title"], kind=plan["kind"], total=plan["total"], drive=plan["drive"])
-        if job.get("state") == "done":
-            log("%s: already done (%s)" % (tid, job.get("msg")))
+        if job.get("state") == "done" or (job.get("switched_at") and job.get("undo")):   # a stopped remove-local reads 'failed'
+            log("%s: already on the console (%s)" % (tid, job.get("msg")))
             continue
         job.pop("can_verify", None)                          # the payload may have been updated since the last run
         have = plan.get("have", [])
@@ -1076,6 +1117,409 @@ def cmd_cancel(args):
         save_state(st)
 
 
+# ---------------------------------------------------------------- remove-local: back to streaming, the space freed
+
+class Refuse(Exception):
+    pass
+
+
+def staged(path):
+    """The only console paths remove-local deletes: inside <drive>/blz-stage/incoming/."""
+    return any(path.startswith(d + "/blz-stage/incoming/") for d in DRIVES) and "/../" not in path and "/./" not in path
+
+
+def same_drive(a, b):
+    return a.split("/")[1:3] == b.split("/")[1:3] or (a.startswith("/data/") and b.startswith("/data/"))
+
+
+def title_of(tid):
+    try:
+        return next((g["title"] for g in games_json() if g.get("tid") == tid and g.get("title")), tid)
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
+        return tid
+
+
+def newest(names, pattern):
+    """The name matching pattern with the highest -<YYYYmmdd-HHMM> stamp in it, or None."""
+    hits = [(re.search(r"(\d{8}-\d{4})", n).group(1), n) for n in names if re.search(pattern, n) and re.search(r"\d{8}-\d{4}", n)]
+    return max(hits)[1] if hits else None
+
+
+def removal_steps(con, job, tid, hb, drive, s):
+    """What remove-local does, worked out before anything changes: the moves OUT (local copy -> incoming/, overlay ->
+    blz-disabled/), the moves BACK (cfg, starter, placeholders), the files to delete (only in incoming/), the payload action
+    after. From the switch's own undo steps when this tool switched the title; else an image in homebrew that IS the drives'
+    image (name + size). Anything else is refused with the reason (a pkg install is never touched)."""
+    inc = drive + "/blz-stage/incoming"
+    r = {"kind": job.get("kind") or "image", "out": [], "back": [], "delete": [], "image": "", "after": "unhide", "bytes": 0}
+    if job.get("switched_at") and job.get("undo"):
+        cfgs, starters = [], []
+        for e in job["undo"]:
+            if e[0] == "unhide":
+                continue
+            if e[0] != "rename" or len(e) != 3:
+                raise Refuse("an undo step this tool does not know (%s): look before changing anything" % e)
+            a, b = e[1], e[2]
+            if a.startswith("/data/blazing/link/") and b.startswith("/data/blazing/link/"):
+                cfgs.append([a, b])                                    # cfg.off-<stamp> -> cfg
+            elif a == "%s/backports/%s" % (hb, tid):
+                r["out"].append([a, b])                                # the overlay the switch restored -> blz-disabled again
+            elif "/blz-stage/stub/" in a and b.startswith(hb + "/"):
+                starters.append([a, b])                                # the parked starter, or a 0-byte placeholder of a folder game
+            elif r["kind"] == "image" and a.startswith(hb + "/") and "/" not in a[len(hb) + 1:]:
+                tmp = "%s/%s.remove-%s" % (inc, a.rsplit("/", 1)[1], s)
+                r["out"].append([a, tmp])                              # the image -> incoming/ (then deleted), whatever its origin
+                r["delete"].append(tmp)
+                r["image"] = a
+            elif r["kind"] == "files" and staged(b):
+                r["out"].append([a, b])                                # a real file -> its .part in incoming/ (then deleted)
+                r["delete"].append(b)
+            else:
+                raise Refuse("an undo step this tool does not know (%s -> %s): look before changing anything" % (a, b))
+        # an image game: the cfg before the starter (a starter never shows without its cfg); a folder game: placeholders first
+        r["back"] = cfgs + starters if r["kind"] == "image" else starters + cfgs
+        if r["kind"] == "image" and not r["image"]:
+            raise Refuse("the journal has no image in %s for %s: look before changing anything" % (hb, tid))
+        sizes = job.get("files") or {}
+        r["bytes"] = sum(int(f.get("size") or 0) for f in sizes.values()) or int(job.get("total") or 0)
+    else:
+        here = con.ls(hb) or {}
+        imgs = [g for g in games_json() if g.get("tid") == tid]
+        g = next((g for g in imgs if (here.get(g["name"]) or {}).get("size") == int(g["size"]) and not here[g["name"]]["dir"]), None)
+        if not g:
+            for root in ("/user/app", "/mnt/ext0/user/app", "/mnt/ext1/user/app"):
+                if ((con.ls("%s/%s" % (root, tid)) or {}).get("app.pkg") or {}).get("size", 0) > 0:
+                    raise Refuse("an installed game: remove it in the PS5's Storage settings")
+            for n, e in here.items():
+                if n.endswith("(%s)" % tid) and e["dir"]:
+                    if (con.ls("/data/blazing/link") or {}).get(tid + ".cfg"):
+                        raise Refuse("it streams already: nothing on this console to remove")
+                    raise Refuse("a full copy the download helper did not make: left alone")
+                if "(%s)" % tid in n and not e["dir"]:
+                    raise Refuse("an image in %s that is not the drives' copy: left alone" % hb)
+            raise Refuse("no local copy of %s on this console" % tid)
+        r["image"] = "%s/%s" % (hb, g["name"])
+        tmp = "%s/%s.remove-%s" % (inc, g["name"], s)
+        r["out"].append([r["image"], tmp])
+        r["delete"].append(tmp)
+        r["bytes"] = int(g["size"])
+        if (con.ls(hb + "/backports") or {}).get(tid):
+            r["out"].append(["%s/backports/%s" % (hb, tid), "%s/blz-disabled/%s-overlay-%s" % (drive, tid, s)])
+        if (con.ls("/data/blazing/link") or {}).get(tid + ".cfg") is None:
+            off = newest(con.ls("/data/blazing/link") or {}, r"^%s\.cfg\.off-" % tid)
+            if off:
+                r["back"].append(["/data/blazing/link/" + off, "/data/blazing/link/%s.cfg" % tid])
+        if not any(n.endswith("(%s)" % tid) and e["dir"] for n, e in here.items()):
+            parked = newest([n for n, e in (con.ls(drive + "/blz-stage/stub") or {}).items() if e["dir"]],
+                            r"\(%s\)-off-\d{8}-\d{4}$" % tid)
+            if parked:
+                r["back"].append(["%s/blz-stage/stub/%s" % (drive, parked), "%s/%s" % (hb, re.sub(r"-off-\d{8}-\d{4}$", "", parked))])
+            else:
+                r["after"] = "install"                                  # no starter kept: the payload builds a new one
+    for a, b in r["out"] + r["back"]:
+        if not same_drive(a, b):
+            raise Refuse("refused: %s and %s are on different drives (a cross-drive rename panics the kernel)" % (a, b))
+    if not all(staged(p) for p in r["delete"]):
+        raise Refuse("refused: a file to delete is outside blz-stage/incoming/: %s" % r["delete"])
+    return r
+
+
+def mv(c, a, b):
+    """A rename that a cut-off run may already have made: done = a gone and b there. Both or neither = stop."""
+    ea, eb = ftp_entry(c, a), ftp_entry(c, b)
+    if ea and not eb:
+        ftp_mkdirs(c, b.rsplit("/", 1)[0])
+        ftp_rename(c, a, b)
+        return True
+    if eb and not ea:
+        return False
+    raise Refuse("cannot move %s -> %s: %s, %s; stopping before anything else changes" % (
+        a, b, "it is there" if ea else "it is not there", "the target exists" if eb else "the target is not there either"))
+
+
+def smp_log(con):
+    raw = con.read("/data/shadowmount/debug.log", timeout=60)
+    return None if raw is None else raw.decode("utf-8", "replace").splitlines()
+
+
+def wait_smp_gone(con, st, job, tid, base, had_link):
+    """True once ShadowMount dropped the title's image: a NEW 'source removed' line for it (the starter's own went at the
+    switch), or its /user/app mount link gone. ShadowMount does nothing while a game runs, so neither does this clock: False
+    only after SMP_GONE_WAIT seconds with no game running and no sign."""
+    idle = 0.0
+    while True:
+        lines = smp_log(con)
+        if lines is not None and any(tid in l and "source removed" in l and l not in base for l in lines):
+            return True
+        if had_link and "mount.lnk" not in (con.ls("/user/app/" + tid) or {"mount.lnk": 1}):
+            return True
+        r = con.running()
+        idle = idle + POLL if r == "" else 0.0
+        if idle >= SMP_GONE_WAIT:
+            return False
+        msg = "waiting for ShadowMount to let go of the copy" + (" (%s runs: it waits for that)" % r if r else "")
+        if job.get("msg") != msg:
+            job["msg"] = msg
+            save_state(st)
+            log("%s: %s" % (tid, msg))
+        time.sleep(POLL)
+
+
+def remove_local(con, st, job, tid, args):
+    """The local copy out, the starter back, the copy deleted. Resumes from job['removal'] after a cut-off run."""
+    status = con.status() or {}
+    hb = status.get("homebrew_dir") or "/data/homebrew"
+    drive = hb.rsplit("/homebrew", 1)[0] or "/data"
+    job.setdefault("title", title_of(tid))
+    r = job.get("removal")
+    if not r:
+        try:
+            r = removal_steps(con, job, tid, hb, drive, stamp())
+        except Refuse as e:
+            job.update(state="failed", msg=str(e), rate=0, eta=0)
+            save_state(st)
+            log("%s: remove-local refused: %s" % (tid, e))
+            hub("%s %s (%s): remove local copy refused: %s" % (con.name, job["title"], tid, e))
+            return False
+        r["started"] = int(time.time())
+        job["removal"] = r
+    job.update(state="removing", msg="taking the local copy out", rate=0, eta=0)
+    save_state(st)
+    log("%s %s: remove local copy (%s, %s): out %d, back %d, delete %d" % (tid, job["title"], r["kind"], gb(r["bytes"]),
+                                                                          len(r["out"]), len(r["back"]), len(r["delete"])))
+    try:
+        wait_not_running(con, tid)
+        if r["kind"] == "image" and "base" not in r:              # what ShadowMount said BEFORE the copy left
+            lines = smp_log(con)
+            if lines is None:
+                raise Refuse("ShadowMount's log cannot be read: nothing changed")
+            r["base"] = [l for l in lines if tid in l]
+            r["had_link"] = "mount.lnk" in (con.ls("/user/app/" + tid) or {})
+            save_state(st)
+        claim(con, "remove-local %s: the local copy out" % tid)
+        try:
+            if r["kind"] == "image":
+                log("%s: hidden in the payload while the copy changes: %s" % (tid, con.action("do=hide&tid=" + tid)))
+            c = con.ftp()
+            for a, b in r["out"]:
+                if mv(c, a, b):
+                    log("%s: %s -> %s" % (tid, a, b))
+            c.quit()
+        finally:
+            release(con)
+        if r["kind"] == "image" and not r.get("smp_gone"):
+            job["msg"] = "waiting for ShadowMount to let go of the copy"
+            save_state(st)
+            if not wait_smp_gone(con, st, job, tid, set(r["base"]), r["had_link"]):
+                claim(con, "remove-local %s: put the copy back" % tid)  # ShadowMount never let go: everything as it was
+                try:
+                    c = con.ftp()
+                    for a, b in reversed(r["out"]):
+                        mv(c, b, a)
+                    c.quit()
+                finally:
+                    release(con)
+                job.pop("removal", None)
+                job.update(state="failed", msg="ShadowMount did not let go of the copy in %d min: put back, it still plays from "
+                                               "the console" % (SMP_GONE_WAIT // 60))
+                save_state(st)
+                log("%s: %s" % (tid, job["msg"]))
+                hub("%s %s (%s): remove local copy stopped: %s" % (con.name, job["title"], tid, job["msg"]))
+                return False
+            r["smp_gone"] = int(time.time())
+            log("%s: ShadowMount let go of the copy" % tid)
+            save_state(st)
+        job["msg"] = "putting the streaming starter back"
+        save_state(st)
+        claim(con, "remove-local %s: the starter back" % tid)
+        try:
+            c = con.ftp()
+            for a, b in r["back"]:
+                if mv(c, a, b):
+                    log("%s: %s -> %s" % (tid, a, b))
+            if r["kind"] == "image":
+                log("%s: %s in the payload: %s" % (tid, r["after"], con.action("do=%s&tid=%s" % (r["after"], tid))))
+            job["msg"] = "deleting %s" % gb(r["bytes"])
+            save_state(st)
+            free0 = avbl_mb(c, drive)
+            for p in r["delete"]:
+                if not staged(p):                                     # removal_steps checked it; never trust it twice
+                    raise Refuse("refused to delete %s (outside blz-stage/incoming/)" % p)
+                if ftp_entry(c, p) == "f":
+                    ftp_delete(c, p)
+                    log("%s: deleted %s" % (tid, p))
+            log("%s: %s free on %s before the delete, %s after" % (tid, free0, drive, avbl_mb(c, drive)))
+            c.quit()
+        finally:
+            release(con)
+    except Refuse as e:
+        job.update(state="failed", msg="remove stopped: %s" % e)
+        save_state(st)
+        log("%s: %s" % (tid, job["msg"]))
+        hub("%s %s (%s): %s" % (con.name, job["title"], tid, job["msg"]))
+        return False
+    if r["kind"] == "image" and SMP_WAIT:                             # best effort: ShadowMount picks the starter up
+        base = set(r["base"])
+        for _ in range(int(SMP_WAIT // max(POLL, 1))):
+            new = [l for l in (smp_log(con) or []) if tid in l and l not in base]
+            if any("mount.lnk created" in l or "register" in l.lower() for l in new):
+                break
+            time.sleep(max(POLL, 1))
+        for l in [l for l in (smp_log(con) or []) if tid in l and l not in set(r["base"])][-6:]:
+            log("  smp: " + l)
+    freed = "%s freed" % gb(r["bytes"])
+    hist = job.setdefault("history", [])
+    hist.append({"switched_at": job.get("switched_at"), "removed_at": int(time.time()), "undo": job.get("undo"),
+                 "removal": {k: v for k, v in r.items() if k != "base"}})
+    for k in ("undo", "switched_at", "verified_at", "removal", "can_verify", "proven_at"):
+        job.pop(k, None)
+    job.update(state="removed", files={}, done=0, eta=0, rate=0, msg="streams from mac1 again; " + freed, removed_at=int(time.time()))
+    save_state(st)
+    log("%s: local copy removed, %s; it streams from mac1 again" % (tid, freed))
+    notice(con, "%s: the local copy is removed (%s). It streams from mac1 again." % (job["title"], freed))
+    hub("%s %s (%s): local copy REMOVED (%s), streams from mac1 again; history in ~/.blazing/download-local/jobs/" % (
+        con.name, job["title"], tid, freed))
+    return True
+
+
+def cmd_remove_local(args):
+    if not args.confirm:
+        raise SystemExit("remove-local deletes the console's copy (it frees the space; the game streams again): add --confirm")
+    con = Console(args.console)
+    ok = True
+    for tid in args.tid:
+        if not lock_job(jkey(con, tid)):
+            log("%s: another run is working on it; skipped here" % tid)
+            ok = False
+            continue
+        st = load_state()
+        job = own_job(st, jkey(con, tid), tid, con.name)
+        for fails in range(1, 13):                               # every step checks first: a dropped link just goes again
+            try:
+                done = remove_local(con, st, job, tid, args)
+                break
+            except NET_ERRORS as e:
+                if fails == 12:
+                    job.update(state="failed", msg="remove stopped, the console stopped answering (%s): asking again resumes it" % e)
+                    save_state(st)
+                    hub("%s %s (%s): %s" % (con.name, job.get("title", tid), tid, job["msg"]))
+                    done = False
+                    break
+                log("%s: the console stopped answering (%s); going on in %d s" % (tid, e, min(300, 15 * fails)))
+                time.sleep(min(300, 15 * fails))
+        ok = done and ok
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------- prove: it ran with no network reads
+
+def log_size(p):
+    try:
+        return os.path.getsize(p)
+    except OSError:
+        return 0
+
+
+def log_hits(p, off, tid):
+    """Request lines naming tid in a server log from byte off on (a smaller file = rotated: from its start)."""
+    try:
+        if os.path.getsize(p) < off:
+            off = 0
+        out = []
+        with open(p, "rb") as fh:
+            fh.seek(off)
+            for raw in fh:
+                if b" GET " in raw and tid.encode() in raw:
+                    out.append(raw.decode("utf-8", "replace").strip())
+        return out
+    except OSError:
+        return []
+
+
+def other_consoles(name):
+    """The other consoles a request in imgserve.log could come from (its lines carry no client address)."""
+    if os.environ.get("BM_DL_OTHERS") is not None:
+        return [n for n in os.environ["BM_DL_OTHERS"].split(",") if n and n != name]
+    try:
+        sys.path.insert(0, TOOLS)
+        import ps5where
+        return [n for n in ps5where.CONSOLES if n != name]
+    except (ImportError, AttributeError):
+        return []
+
+
+def cmd_prove(args):
+    """Passive: never launches anything. Waits until one of the titles runs, then counts imgserve (and dirserve) requests
+    naming it from the look before the launch until --minutes after. 0 = PROVEN LOCAL (a line in games-proven.tsv). Another
+    console running the same title meanwhile = inconclusive: its requests look the same in the log."""
+    con = Console(args.console)
+    want, others = list(args.tid), other_consoles(con.name)
+    logs = [p for p in (IMGLOG, DIRLOG) if os.path.exists(p)]
+    if IMGLOG not in logs:
+        raise SystemExit("no imgserve log at %s: nothing to count, so nothing could be proven" % IMGLOG)
+    deadline = time.time() + args.wait_hours * 3600
+    proven, bad, unsure = [], [], []
+    mark = {p: log_size(p) for p in logs}
+    first = True
+    log("prove: waiting for %s to run on %s (up to %.0f h); then %.1f min of imgserve/dirserve requests are counted" % (
+        ", ".join(want), con.name, args.wait_hours, args.minutes))
+    while want and time.time() < deadline:
+        r = con.running()
+        if r not in want:
+            mark, first = {p: log_size(p) for p in logs}, False
+            time.sleep(max(POLL, 0.2))
+            continue
+        tid, t0 = r, time.time()
+        if first:
+            log("%s was already running: counting from now (its launch reads are not in the window)" % tid)
+        log("%s runs on %s: counting requests for %.1f min" % (tid, con.name, args.minutes))
+        seen_elsewhere, closed = set(), False
+        while time.time() - t0 < args.minutes * 60:
+            time.sleep(max(POLL, 0.2))
+            for n in others:
+                if running_on(n) == tid:
+                    seen_elsewhere.add(n)
+            if con.running() not in (tid, None):
+                closed = True
+                break
+        secs = int(time.time() - t0)
+        hits = [h for p in logs for h in log_hits(p, mark.get(p, 0), tid)]
+        mark, first = {p: log_size(p) for p in logs}, False
+        title = title_of(tid)
+        if closed and secs < 60:                                  # gone within a minute: a failed launch, not a proof
+            log("%s closed after %d s (did it start?): waiting for the next launch" % (tid, secs))
+            hub("prove %s %s (%s): closed after %d s - did it start? waiting for the next launch" % (con.name, title, tid, secs))
+            continue
+        want.remove(tid)
+        when = time.strftime("%Y-%m-%d %H:%M")
+        if seen_elsewhere:
+            unsure.append(tid)
+            log("%s: INCONCLUSIVE: %s ran it too (imgserve.log does not say which console asked)" % (tid, ", ".join(seen_elsewhere)))
+            hub("prove %s %s (%s): INCONCLUSIVE, %s ran it at the same time" % (con.name, title, tid, ", ".join(seen_elsewhere)))
+        elif hits:
+            bad.append(tid)
+            log("%s: NOT LOCAL: %d requests in %d s, first: %s" % (tid, len(hits), secs, hits[0][:160]))
+            hub("prove %s %s (%s): NOT LOCAL - %d imgserve/dirserve requests in %d min while it ran" % (con.name, title, tid, len(hits), secs // 60))
+        else:
+            proven.append(tid)
+            line = "%s\t%s\t%s\t%s dl-local prove: ran %d min from the console's own drive, imgserve.log + dirserve.log 0 requests for %s " \
+                   "in that window (no other console ran it)\n" % (tid, con.name, when, when, secs // 60, tid)
+            with open(PROVEN, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            st = load_state()
+            j = st["jobs"].get(jkey(con, tid))
+            if j:
+                st["own"].add(jkey(con, tid))
+                j["proven_at"] = int(time.time())
+                save_state(st)
+            log("%s: PROVEN LOCAL: %d min, 0 requests" % (tid, secs // 60))
+            hub("prove %s %s (%s): PROVEN LOCAL - ran %d min, imgserve 0 requests for it" % (con.name, title, tid, secs // 60))
+    for tid in want:
+        log("%s: did not run within %.0f h: not proven" % (tid, args.wait_hours))
+    print("proven %s; not local %s; inconclusive %s; never ran %s" % (proven or "-", bad or "-", unsure or "-", want or "-"))
+    return 1 if bad else 3 if (unsure or want) else 0
+
+
 # ---------------------------------------------------------------- the worker the app talks to (through the payload)
 
 ACTIVE = ("queued", "waiting", "sending", "verifying", "switching", "removing")
@@ -1120,9 +1564,9 @@ def put_status(con, text):
 
 
 def cmd_serve(args):
-    """Answers the app: every --every-poll seconds GET /api/downloads of each console; a new `download` request starts a `get`
-    run (at most --max at once per console), `cancel` stops that title's run and deletes its staged files, `remove_local` is
-    reported as not built yet. dl-status.tsv goes back to the console each round, so the app shows the progress."""
+    """Answers the app: every --poll seconds GET /api/downloads of each console; a new `download` request starts a `get` run,
+    `remove_local` a `remove-local --confirm` run (at most --max runs at once per console, one per title), `cancel` stops that
+    title's run and deletes its staged files. dl-status.tsv goes back to the console each round, so the app shows progress."""
     cons = [Console(t) for t in [args.console] + list(args.tid)]
     seenp = os.path.join(HOME, "serve-seen.json")
     try:
@@ -1146,9 +1590,9 @@ def cmd_serve(args):
                     json.dump(seen, fh)
                 os.replace(seenp + ".tmp", seenp)
                 stopf = job_file(key)[:-5] + ".stop"
-                if r["what"] == "download":
+                if r["what"] in ("download", "remove_local"):
                     if key in procs and procs[key].poll() is None:
-                        log("serve: %s asked again: already running" % key)
+                        log("serve: %s asked %s: a run is already working on it" % (key, r["what"]))
                         continue
                     if sum(1 for k, p in procs.items() if k.startswith(con.name + ":") and p.poll() is None) >= args.max:
                         log("serve: %s waits: %d runs already on %s" % (key, args.max, con.name))
@@ -1157,17 +1601,16 @@ def cmd_serve(args):
                     if os.path.exists(stopf):
                         os.remove(stopf)
                     os.makedirs(os.path.join(HOME, "runs"), exist_ok=True)
-                    cmd = [sys.executable, "-I", os.path.abspath(__file__), "get", con.name if con.name != con.ip else con.ip,
-                           r["tid"], "--notice", "--hub", HUB, "--every", str(args.every)]
+                    cmd = [sys.executable, "-I", os.path.abspath(__file__), "get" if r["what"] == "download" else "remove-local",
+                           con.name if con.name != con.ip else con.ip, r["tid"], "--hub", HUB, "--every", str(args.every)]
+                    cmd += ["--notice"] if r["what"] == "download" else ["--confirm"]   # the app's own confirm asked him
                     procs[key] = subprocess.Popen(cmd, stdout=open(os.path.join(HOME, "runs", key.replace(":", "-") + ".log"), "a"),
                                                   stderr=subprocess.STDOUT)
-                    log("serve: %s: download asked by the app -> run pid %d" % (key, procs[key].pid))
+                    log("serve: %s: %s asked by the app -> run pid %d" % (key, r["what"], procs[key].pid))
                 elif r["what"] == "cancel":
                     open(stopf, "w").write("cancelled by the app %d\n" % at)
                     cancelled.add(key)
                     log("serve: %s: cancel asked by the app" % key)
-                elif r["what"] == "remove_local":
-                    log("serve: %s: remove-local asked: not built yet (DOWNLOAD-TO-CONSOLE.md 5.5)" % key)
             for key in [k for k in cancelled if k.startswith(con.name + ":")]:
                 if key in procs and procs[key].poll() is None:
                     continue                                  # it stops at its next progress check
@@ -1204,7 +1647,7 @@ def cmd_status(args):
 def main():
     global HUB
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=("plan", "get", "put", "verify", "switch", "cancel", "serve", "status"))
+    ap.add_argument("cmd", choices=("plan", "get", "put", "verify", "switch", "cancel", "remove-local", "prove", "serve", "status"))
     ap.add_argument("console", nargs="?")
     ap.add_argument("tid", nargs="*")
     ap.add_argument("--rate", default="0.85", help="MB/s used for time estimates (measured 24 Oct away: 0.86)")
@@ -1218,6 +1661,9 @@ def main():
     ap.add_argument("--poll", type=int, default=20, help="serve: seconds between rounds")
     ap.add_argument("--max", type=int, default=3, help="serve: runs at once per console (one stream each)")
     ap.add_argument("--once", action="store_true", help="serve: one round, wait for the runs it started, write the status, exit")
+    ap.add_argument("--confirm", action="store_true", help="remove-local: yes, delete the console's copy (the game streams again)")
+    ap.add_argument("--minutes", type=float, default=5.0, help="prove: minutes of play counted after the launch")
+    ap.add_argument("--wait-hours", type=float, default=12.0, help="prove: how long to wait for the titles to be played")
     ap.add_argument("--every", type=float, default=30.0, help="progress line every N seconds")
     ap.add_argument("--cancel-file", default=os.path.join(HOME, "STOP"), help="stop cleanly when this file exists")
     args = ap.parse_args()
@@ -1227,7 +1673,7 @@ def main():
     if args.cmd == "serve" and not args.console:
         ap.error("serve CONSOLE [CONSOLE...]")
     return {"plan": cmd_plan, "get": cmd_get, "put": cmd_put, "verify": cmd_verify, "switch": cmd_switch, "cancel": cmd_cancel,
-            "serve": cmd_serve, "status": cmd_status}[args.cmd](args)
+            "remove-local": cmd_remove_local, "prove": cmd_prove, "serve": cmd_serve, "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":
