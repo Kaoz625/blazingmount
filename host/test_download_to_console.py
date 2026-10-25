@@ -331,9 +331,9 @@ def main():
         if not cond:
             fails.append(what)
 
-    def run(*a, timeout=120):
-        r = subprocess.run([sys.executable, "-I", TOOL] + list(a) + ["--every", "0.2"], env=env, capture_output=True, text=True,
-                           timeout=timeout)
+    def run(*a, timeout=120, extra=None):
+        r = subprocess.run([sys.executable, "-I", TOOL] + list(a) + ["--every", "0.2"], env=dict(env, **(extra or {})), capture_output=True,
+                           text=True, timeout=timeout)
         return r.returncode, r.stdout + r.stderr
 
     def job(tid):
@@ -466,13 +466,18 @@ def main():
               "Alpha: the starter came back only after ShadowMount dropped the image")
         check(not j.get("undo") and not j.get("files") and len(j.get("history", [])) == 1, "Alpha: journal reset (undo kept in history)")
         check("local copy is removed" in open(os.path.join(work, "notices.log")).read(), "Alpha: TV notice")
-        # a folder game: real files out + deleted, 0-byte placeholders back, cfg back
+        # a folder game: real files out + deleted, 0-byte placeholders back, cfg back; the first run dies right after the
+        # placeholders are back (a replay of OUT would now carry a placeholder into incoming/): the next run only deletes
+        code, out = run("remove-local", con, "PPSA70003", "--confirm", extra={"BM_DL_TEST_DIE": "back"})
+        check(code == 9 and job("PPSA70003").get("state") == "removing", "Gamma: a run that dies after the placeholders are back leaves 'removing'")
         code, out = run("remove-local", con, "PPSA70003", "--confirm")
         gst_ok = all(os.path.getsize(os.path.join(gst, rel)) == 0 for rel in big)
         check(code == 0 and gst_ok and job("PPSA70003").get("state") == "removed" and os.path.isfile(os.path.join(link, "PPSA70003.cfg")),
               "Gamma (folder game): placeholders back, cfg back" + ("" if code == 0 else ": " + out[-900:]))
         check(not [f for dp, _, fns in os.walk(os.path.join(inc, "PPSA70003-files")) for f in fns], "Gamma: the real files deleted from incoming/")
-        # the overlay the switch restored goes back to blz-disabled; the /data copy stays
+        # the overlay the switch restored goes back to blz-disabled; the /data copy stays; the first run dies after the delete
+        code, out = run("remove-local", con, "PPSA70002", "--confirm", extra={"BM_DL_TEST_DIE": "deleted"})
+        check(code == 9 and not any(n.startswith("Beta") for n in os.listdir(inc)), "Beta: a run that dies right after the delete")
         code, out = run("remove-local", con, "PPSA70002", "--confirm")
         check(code == 0 and not os.path.exists(os.path.join(hb, "backports", "PPSA70002"))
               and os.path.isdir(os.path.join(ROOT, "mnt", "ext1", "blz-disabled", "PPSA70002-overlay-20261022-0838", "fakelib")),

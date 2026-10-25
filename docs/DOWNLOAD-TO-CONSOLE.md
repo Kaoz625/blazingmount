@@ -239,7 +239,8 @@ As built (25 Oct 2026):
   OUT (the image -> `incoming/<name>.remove-<stamp>`, whatever it came from: sent, parked or copied on the console; the overlay
   the switch restored -> its old `blz-disabled/` name; a folder game's real files -> their `.part` in `incoming/`) and BACK (cfg,
   parked starter, 0-byte placeholders). An undo step it does not recognise = refused before any change. The plan is saved in the
-  job (`removal`) before the first rename, so a cut-off run resumes the same plan; every rename checks first (source there,
+  job (`removal`) before the first rename, so a cut-off run resumes the same plan, and each stage (out, back, deleted) is marked done
+  as it ends (a replay of OUT after BACK would carry a folder game's placeholders into incoming/); every rename checks first (source there,
   target not = do it; the reverse = done before; anything else = stop).
 - **No journal**: only an image in homebrew that IS the drives' image (name + size), with the newest parked starter
   (`stub/<starter>-off-<stamp>`) and newest `cfg.off-*` brought back; with no parked starter the payload gets `install`

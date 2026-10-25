@@ -1224,6 +1224,12 @@ def removal_steps(con, job, tid, hb, drive, s):
     return r
 
 
+def die_here(stage):
+    """Tests only (BM_DL_TEST_DIE=<stage>): the run dies right after a stage, like mac1 losing power there."""
+    if os.environ.get("BM_DL_TEST_DIE") == stage:
+        os._exit(9)
+
+
 def mv(c, a, b):
     """A rename that a cut-off run may already have made: done = a gone and b there. Both or neither = stop."""
     ea, eb = ftp_entry(c, a), ftp_entry(c, b)
@@ -1296,17 +1302,23 @@ def remove_local(con, st, job, tid, args):
             r["base"] = [l for l in lines if tid in l]
             r["had_link"] = "mount.lnk" in (con.ls("/user/app/" + tid) or {})
             save_state(st)
-        claim(con, "remove-local %s: the local copy out" % tid)
-        try:
-            if r["kind"] == "image":
-                log("%s: hidden in the payload while the copy changes: %s" % (tid, con.action("do=hide&tid=" + tid)))
-            c = con.ftp()
-            for a, b in r["out"]:
-                if mv(c, a, b):
-                    log("%s: %s -> %s" % (tid, a, b))
-            c.quit()
-        finally:
-            release(con)
+        # each stage is marked done in the job as it ends: after the BACK renames a folder game's live paths hold the 0-byte
+        # placeholders again, and replaying OUT then would carry a placeholder into incoming/ (and delete it)
+        if not r.get("out_done"):
+            claim(con, "remove-local %s: the local copy out" % tid)
+            try:
+                if r["kind"] == "image":
+                    log("%s: hidden in the payload while the copy changes: %s" % (tid, con.action("do=hide&tid=" + tid)))
+                c = con.ftp()
+                for a, b in r["out"]:
+                    if mv(c, a, b):
+                        log("%s: %s -> %s" % (tid, a, b))
+                c.quit()
+            finally:
+                release(con)
+            r["out_done"] = int(time.time())
+            save_state(st)
+            die_here("out")
         if r["kind"] == "image" and not r.get("smp_gone"):
             job["msg"] = "waiting for ShadowMount to let go of the copy"
             save_state(st)
@@ -1329,18 +1341,27 @@ def remove_local(con, st, job, tid, args):
             r["smp_gone"] = int(time.time())
             log("%s: ShadowMount let go of the copy" % tid)
             save_state(st)
-        job["msg"] = "putting the streaming starter back"
-        save_state(st)
-        claim(con, "remove-local %s: the starter back" % tid)
-        try:
-            c = con.ftp()
-            for a, b in r["back"]:
-                if mv(c, a, b):
-                    log("%s: %s -> %s" % (tid, a, b))
-            if r["kind"] == "image":
-                log("%s: %s in the payload: %s" % (tid, r["after"], con.action("do=%s&tid=%s" % (r["after"], tid))))
+        if not r.get("back_done"):
+            job["msg"] = "putting the streaming starter back"
+            save_state(st)
+            claim(con, "remove-local %s: the starter back" % tid)
+            try:
+                c = con.ftp()
+                for a, b in r["back"]:
+                    if mv(c, a, b):
+                        log("%s: %s -> %s" % (tid, a, b))
+                if r["kind"] == "image":
+                    log("%s: %s in the payload: %s" % (tid, r["after"], con.action("do=%s&tid=%s" % (r["after"], tid))))
+                c.quit()
+            finally:
+                release(con)
+            r["back_done"] = int(time.time())
+            save_state(st)
+            die_here("back")
+        if not r.get("deleted"):
             job["msg"] = "deleting %s" % gb(r["bytes"])
             save_state(st)
+            c = con.ftp()
             free0 = avbl_mb(c, drive)
             for p in r["delete"]:
                 if not staged(p):                                     # removal_steps checked it; never trust it twice
@@ -1350,8 +1371,9 @@ def remove_local(con, st, job, tid, args):
                     log("%s: deleted %s" % (tid, p))
             log("%s: %s free on %s before the delete, %s after" % (tid, free0, drive, avbl_mb(c, drive)))
             c.quit()
-        finally:
-            release(con)
+            r["deleted"] = int(time.time())
+            save_state(st)
+            die_here("deleted")
     except Refuse as e:
         job.update(state="failed", msg="remove stopped: %s" % e)
         save_state(st)
