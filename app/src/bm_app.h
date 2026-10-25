@@ -143,6 +143,16 @@ inline const char* DlPercent(long long done, long long total) {   // "DOWNLOADIN
   if (pct[p].empty()) pct[p] = "DOWNLOADING " + std::to_string(p) + "%";
   return pct[p].c_str();
 }
+// The app's newest request that mac1's worker has not taken up yet: no job line, or one older than the request (the worker
+// writes the line within ~20 s of taking it up). `request` alone cannot say: a remove run on mac1 leaves the old "download".
+inline bool Pending(const Game& g) { return g.dlState.empty() || (!DlActive(g.dlState) && g.requestAt > g.dlAt); }
+inline bool DlAsked(const Game& g) { return g.request == "download" && Pending(g); }
+inline bool RmAsked(const Game& g) { return g.request == "remove_local" && Pending(g); }
+// A copy mac1's helper can take back (0.5.1): an image (it checks that it is the drives' copy) or a folder game it filled itself
+// (it has a job line). Never a pkg install, never a full copy someone else made (BlazingArch, his own dumps).
+inline bool Removable(const Game& g) {
+  return g.onConsole && g.local != "pkg" && (g.local == "image" || (!g.dlState.empty() && g.dlMsg.find("did not make") == std::string::npos));
+}
 inline Badge BadgeOf(const Game& g) {
   const std::string& s = g.state;
   if (s == "playing") return {"PLAYING", 3};
@@ -150,9 +160,12 @@ inline Badge BadgeOf(const Game& g) {
   if (g.dlState == "sending") return {DlPercent(g.dlDone, g.dlTotal), 3};
   if (g.dlState == "verifying") return {"CHECKING COPY", 3};
   if (g.dlState == "switching") return {"SWITCHING", 3};
+  if (g.dlState == "removing") return {"REMOVING", 3};
   if (g.dlState == "queued" || g.dlState == "waiting") return {"DOWNLOAD WAITS", 0};
   if (g.dlState == "failed" && g.request == "download") return {"DOWNLOAD FAILED", 2};
-  if (g.request == "download" && g.dlState.empty()) return {"DOWNLOAD ASKED", 0};
+  if (g.dlState == "failed" && g.request == "remove_local") return {"REMOVE FAILED", 2};
+  if (DlAsked(g)) return {"DOWNLOAD ASKED", 0};
+  if (RmAsked(g)) return {"REMOVE ASKED", 0};
   if (g.onConsole) return {"ON CONSOLE", 1};
   if (s == "installed") return {g.local == "starter" ? "STREAMS" : g.local == "image" ? "IMAGE" : "FULL COPY", g.local == "starter" ? 0 : 1};
   if (s == "outdated") return {"OLD IMAGE", 2};
@@ -581,9 +594,13 @@ class App {
     }
     if (b == kCross) {
       if (g->state == "playing") Toast(g->title + " is running: close it first");
-      else if (DlActive(g->dlState) || (g->request == "download" && g->dlState.empty()))
+      else if (g->dlState == "removing") Toast(g->title + ": removing the local copy, wait for it");   // a removal is never cancelled
+      else if (RmAsked(*g)) Toast("Remove asked: mac1's helper starts it");
+      else if (DlActive(g->dlState) || DlAsked(*g))
         Ask_("cancel_dl", *g, "Stop downloading " + g->title + "?",
              "What arrived so far is deleted from this console. The game keeps streaming from mac1.", "Stop download");
+      else if (g->onConsole && g->local == "pkg") Toast(g->title + " is an installed game: remove it in the PS5's Storage settings");
+      else if (Removable(*g)) AskRemoveLocal(*g);
       else if (g->onConsole) Toast(g->title + " plays from this console" + (g->copies.empty() ? "" : ": " + g->copies));
       else if (g->local == "starter") AskDownload(*g);
       else if (g->state == "needs_fw") Toast(g->title + " needs FW " + g->fw + " (this console: " + consoleFw_ + ")");
@@ -601,12 +618,27 @@ class App {
             const std::string& altAction = "", const std::string& alt = "") {
     confirm_ = {true, action, g.tid, title, body, yes, altAction, alt};
   }
-  // Download to this console: size, free space now and after, the time at mac1's measured speed, the data it uses when away
-  void AskDownload(const Game& g) {
+  // The drive downloads go to (the payload's homebrew drive): its name on screen and its free space now
+  struct HomeDrive { const char* name; long long freeMb; };
+  HomeDrive Home() {
     const std::string hb = status_["homebrew_dir"].str();
     const std::string drv = hb.rfind("/mnt/ext1", 0) == 0 ? "ext1" : hb.rfind("/mnt/ext0", 0) == 0 ? "ext0" : "data";
-    const char* drvName = drv == "ext1" ? "M.2" : drv == "ext0" ? "extended storage" : "console storage";
-    const long long freeMb = status_["free_mb"][drv.c_str()].ll(), keepMb = std::max(status_["min_free_mb"].ll(), 0LL);
+    return {drv == "ext1" ? "M.2" : drv == "ext0" ? "extended storage" : "console storage", status_["free_mb"][drv.c_str()].ll()};
+  }
+  // Remove the local copy (0.5.1): the space it frees; mac1 puts the streaming starter back
+  void AskRemoveLocal(const Game& g) {
+    const HomeDrive d = Home();
+    const long long bytes = g.localBytes > 0 ? g.localBytes : g.size;
+    std::string body = "Frees " + Gb(bytes) + " on the " + d.name + (d.freeMb >= 0 ? " (" + FreeText(d.freeMb + bytes / (1024 * 1024)) + " after)" : "") +
+                       ". The game streams from mac1 again.";
+    if (wall_ - status_["dl_worker_at"].ll() > 120) body += " mac1's download helper is not answering right now: it starts when it is back.";
+    Ask_("remove_local", g, "Remove the local copy of " + g.title + "?", body, "Remove local copy");
+  }
+  // Download to this console: size, free space now and after, the time at mac1's measured speed, the data it uses when away
+  void AskDownload(const Game& g) {
+    const HomeDrive d = Home();
+    const char* drvName = d.name;
+    const long long freeMb = d.freeMb, keepMb = std::max(status_["min_free_mb"].ll(), 0LL);
     const long long need = g.size, afterMb = freeMb - need / (1024 * 1024);
     if (need <= 0) { Toast(g.title + ": its size is not known yet"); return; }
     if (afterMb < keepMb) {
@@ -948,11 +980,16 @@ class App {
       else if (!g->localPath.empty()) here += ": " + g->localPath;
       if (g->pinned) here += "  (pinned)";
       Fact(b, px, y, pw, "This console", here, g->onConsole ? c::kGood : g->local == "none" ? c::kTextDim : c::kText);
-      if (!g->dlState.empty() || g->request == "download") {
-        std::string d = g->dlState.empty() ? "asked, mac1 starts it" : g->dlState;
-        if (g->dlTotal > 0) d += "   " + Gb(g->dlDone) + " of " + Gb(g->dlTotal);
+      const bool rm = g->request == "remove_local" || g->dlState == "removing" || (g->dlState == "removed" && !DlAsked(*g));
+      if (rm) {                                          // a removal: no "X of Y GB"; the job line of the old download is not this
+        std::string d = RmAsked(*g) ? "asked, mac1 starts it" : g->dlState;
+        if (!RmAsked(*g) && !g->dlMsg.empty()) d += ": " + g->dlMsg;
+        Fact(b, px, y, pw, "Local copy", d, g->dlState == "failed" ? c::kAccent : c::kText);
+      } else if (!g->dlState.empty() || g->request == "download") {
+        std::string d = DlAsked(*g) ? "asked, mac1 starts it" : g->dlState;
+        if (g->dlTotal > 0 && !DlAsked(*g)) d += "   " + Gb(g->dlDone) + " of " + Gb(g->dlTotal);
         if (g->dlState == "sending" && g->dlEta > 0) d += "   about " + std::to_string(g->dlEta / 3600) + " h " + std::to_string(g->dlEta % 3600 / 60) + " min left";
-        if (!g->dlMsg.empty()) d += "   " + g->dlMsg;
+        if (!g->dlMsg.empty() && !DlAsked(*g)) d += "   " + g->dlMsg;
         Fact(b, px, y, pw, "Download", d, g->dlState == "failed" ? c::kAccent : c::kText);
       }
       Fact(b, px, y, pw, "Played", g->proof.empty() ? "no proof yet" : g->proof, g->proof.empty() ? c::kTextDim : c::kGood);
@@ -960,7 +997,8 @@ class App {
     }
     std::string hint;
     if (g) {
-      if (DlActive(g->dlState)) hint = "{CROSS} Stop download   ";
+      if (DlActive(g->dlState)) hint = g->dlState == "removing" ? "" : "{CROSS} Stop download   ";
+      else if (Removable(*g) && !RmAsked(*g) && g->state != "playing") hint = "{CROSS} Remove local copy   ";
       else if (g->local == "starter" && !g->onConsole && g->state != "playing") hint = "{CROSS} Download to console   ";
       else if (g->local == "none" && g->state != "needs_fw" && g->state != "building") hint = "{CROSS} Install   ";
       if (g->local == "starter" && g->onDrives && g->state != "playing") hint += "{TRIANGLE} Rebuild   ";

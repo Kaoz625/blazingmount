@@ -147,6 +147,16 @@ int main(int argc, char** argv) {
   if (on("22-streams")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Press(kTouch); r.Wait(1); bad += Shot(font, r, out + "/22-streams"); }
   if (on("23-download-confirm")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kDown); r.Press(kCross);
                                    bad += Shot(font, r, out + "/23-download-confirm"); }
+  // 0.5.1 REMOVE LOCAL COPY (docs/DOWNLOAD-TO-CONSOLE.md 5.5): On console list = Wolverine (pkg), BloodRayne 2 (image), Dragon's
+  // Dogma 2 (being removed), PPSA99171, PPSA99191 (a full copy mac1 refused to take back)
+  if (on("24-remove-local-confirm")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kDown);
+                                       r.Press(kCross); bad += Shot(font, r, out + "/24-remove-local-confirm"); }
+  if (on("25-installed-toast")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kCross);
+                                  bad += Shot(font, r, out + "/25-installed-toast"); }
+  if (on("26-removing")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kDown); r.Press(kDown);
+                           r.Wait(1); bad += Shot(font, r, out + "/26-removing"); }
+  if (on("27-remove-failed")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch);
+                                for (int i = 0; i < 4; ++i) r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/27-remove-failed"); }
   if (on("20-discover-wishlist")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); r.Press(kL2); r.Wait(1); bad += Shot(font, r, out + "/20-discover-wishlist"); }
   std::printf(bad ? "%d FAIL\n" : "ALL SHOTS OK\n", bad);
   return bad ? 1 : 0;
