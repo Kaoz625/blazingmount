@@ -57,3 +57,11 @@ Blockers: DIGI5 claim (digi5-test-agent); hooks wait for 11:00 hub ack window.
   `open -a Terminal ~/.blazing/library/watch.command` (follows drives + owned list every 5 min).
 - imgserve library routes: blazing-fighters 8ffc032, built mac1 ~/.blazing/imgserve/bin.next, NOT deployed (needs a quiet :4451 restart; asked on hub).
 - bm_api passes catalog/covers through (12a4091). Hooks still NOT in blazingmountd.c (11:00 plan). PS5 payload with hooks built mac2 ~/NYCT/bm-ui-build (not installed).
+
+---
+## blazing-live-speed lane (24 Oct 2026, 21:0x) - full log: ~/.claude-team/handoffs/live-speed.md
+Working on: PHAT5 away (Verizon hotspot) streaming speed - live monitor + measured tuning.
+Last action: measured 8 vs 16 link connections and 1 MiB requests (n=10): no significant gain -> no link fork change; the hotspot pipe (~1-2.3 MB/s, lossy) is the limit.
+Next step: when Markus next streams a game away, `tail -f ~/.claude-team/ai-notes/away-speed.tsv` (new_conns should be ~0), then pull /data/blazing/link/<TID>.log from PHAT5 and compare "remote http ... avg us" with 1.2-2.3 s per request before the 20:35 forward fix.
+Key files: ~/.blazing/live-speed/ (monitor.py, bench_*.py, backup/), PHAT5 /data/blazing/mount.conf (+ proxy 127.0.0.1 14451), /data/tailscale/config.json (forward 14451), mac1 /Library/LaunchDaemons/com.nyctailblazers.tcp-tuning.plist
+Blockers: DIGI5 wedged (claude-nyc-info) - needs the same forward + mount.conf line later; upstream ps5-tailscale MaxIdleConnsPerHost issue and the MacBook's 2.5 MB/s background download both need Markus's OK.
