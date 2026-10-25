@@ -309,9 +309,13 @@ Passive only: it never launches anything. It waits until the title runs, then co
   install never deleted, cancel.
   Since 25 Oct also remove-local (image, folder game, overlay back, ShadowMount silent -> put back, pkg + stranger's copy
   refused, through `serve`, downloaded again after; every DELE checked to be in `incoming/`) and prove (proven, not local,
-  inconclusive, never ran): 55 checks.
-- `host/test_download_e2e.py` (NOT BUILT YET): the tool against the REAL host-built payload (`BM_ROOT`) + the fake ftpsrv/websrv
-  over the same root: app request -> worker -> transfer -> `/api/sha256` verify -> switch -> `/api/library` shows `on_console`.
+  inconclusive, never ran) and a cut-off remove resumed after each stage: 57 checks.
+- `host/test_download_e2e.py` (25 Oct): the tool against the REAL host-built payload (`BM_ROOT`) + the fake ftpsrv/websrv
+  over the same root: the payload builds the starter -> app request -> `downloads.tsv` -> `serve` -> transfer -> the payload's
+  own `/api/sha256` -> switch -> `/api/library` shows `on_console`, `skip`, job `done`; an Install press after it builds no
+  starter over the image; Remove local copy -> starter + cfg back, `unhide`, the image deleted from `incoming/` only, job
+  `removed`. A watcher fails it if homebrew ever holds the starter and the image at once. 28 checks (a payload whose hide is
+  ignored and whose image is not 'present' fails 7).
 
 ## 8. Rollout
 
