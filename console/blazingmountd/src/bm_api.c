@@ -18,11 +18,15 @@
 //
 // HTTP/1.0 on 0.0.0.0:BM_API_PORT (8094), one request per connection, JSON out:
 //   GET  /api/status                 version, gen, busy, route, free space, ShadowMount+, last pass, recent action results
-//   GET  /api/library                every game: host image facts + this console's copy + choice + state + proof
+//   GET  /api/library                every game: host image facts + this console's copies (starter / full / image / pkg / parked; the
+//                                    active one, on_console) + choice + state + proof + its download request and mac1's progress
 //   GET  /api/settings               mount.conf keys: value, default, help
 //   GET  /api/log?lines=N            the tail of /data/blazing/blazingmountd.log
 //   GET  /api/icon/<TID>             icon0.png (local starter, else cached, else fetched from the host once)
+//   GET  /api/downloads              v2.8, docs/DOWNLOAD-TO-CONSOLE.md: the app's download requests + mac1's status + free space + route
+//   GET  /api/sha256?path=&off=&len= v2.8: SHA-256 of up to 1 GiB of a file under <drive>/blz-stage/incoming/ (mac1 verifies a download)
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
+//        | download | remove_local | cancel_dl (v2.8: one line per title in /data/blazing/downloads.tsv for mac1's worker)
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
 //   GET  /api/catalog                the host's /library.json: EVERY game Markus owns on every system (blazingmount host/library)
 //   GET  /api/covers.json            where each cover sits in the sprite sheets (page, cell, colour)
@@ -344,13 +348,16 @@ static void choice_set(choices_t *ch, const char *tid, const char *what) {   // 
     if (what[0] && ch->n < MAX_CH) { snprintf(ch->tid[ch->n], 16, "%s", tid); snprintf(ch->what[ch->n], 6, "%s", what); ch->n++; }
 }
 
-// ---------------------------------------------------------------- what this console has: one row per title id found
+// ---------------------------------------------------------------- what this console has: one row per copy found
+// v2.8 (docs/DOWNLOAD-TO-CONSOLE.md 4.1): besides the homebrew folders, a console can hold a game as a real pkg install
+// (/user/app/<TID>/app.pkg: Wolverine's 101.6 GB sat under its starter on PHAT5) or as a parked copy (blz-stage/parked).
+// The ACTIVE copy is the one ShadowMount launches: a homebrew entry beats a pkg install; a parked copy is never active.
 typedef struct {
-    char tid[16], kind[10];   // kind: starter | full | image
+    char tid[16], kind[10];   // kind: starter | full | image | pkg | parked
     char path[700];           // console path (no BM_ROOT prefix)
     char key[48];             // starter: the image key its cfg streams from ("base /t/<key>")
     char fmt[12];             // image: the file's extension
-    long long bytes;          // image: file size
+    long long bytes;          // image / parked file: file size; pkg: app.pkg size
     int pinned;               // folder holds .blazingmount-pin: auto-update leaves it alone
 } local_t;
 #define MAX_LOCAL 1024
@@ -411,8 +418,136 @@ static int scan_local(const conf_t *c, local_t *out, int max) {
         }
         closedir(d);
     }
+    // real pkg installs: <root>/<TID>/app.pkg with bytes in it (ShadowMount's own titles keep only mount.lnk + sce_sys there)
+    static const char *pkgs[] = { "/user/app", "/mnt/ext0/user/app", "/mnt/ext1/user/app", 0 };
+    for (int r = 0; pkgs[r] && nl < max; r++) {
+        char rp[600]; DIR *d = opendir(P(rp, sizeof rp, pkgs[r]));
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d)) && nl < max) {
+            if (!valid_tid(e->d_name)) continue;
+            char ap[1400]; snprintf(ap, sizeof ap, "%s/%s/app.pkg", rp, e->d_name);
+            struct stat st; if (stat(ap, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) continue;
+            local_t *L = &out[nl++]; memset(L, 0, sizeof *L);
+            snprintf(L->tid, sizeof L->tid, "%s", e->d_name); snprintf(L->kind, sizeof L->kind, "pkg");
+            snprintf(L->path, sizeof L->path, "%s/%s", pkgs[r], e->d_name); snprintf(L->fmt, sizeof L->fmt, "pkg");
+            L->bytes = (long long)st.st_size;
+        }
+        closedir(d);
+    }
+    // parked copies (phat5-games convert, a download's undo): on the console, never launched
+    static const char *parked[] = { "/data/blz-stage/parked", "/mnt/ext0/blz-stage/parked", "/mnt/ext1/blz-stage/parked", "/mnt/usb0/blz-stage/parked",
+                                    "/mnt/usb1/blz-stage/parked", "/data/blz-parked", 0 };
+    for (int r = 0; parked[r] && nl < max; r++) {
+        char rp[600]; DIR *d = opendir(P(rp, sizeof rp, parked[r]));
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d)) && nl < max) {
+            char tid[16] = "";
+            if (e->d_name[0] == '.' || !first_tid(e->d_name, tid)) continue;
+            char full[1400]; snprintf(full, sizeof full, "%s/%s", rp, e->d_name);
+            struct stat st; if (stat(full, &st) != 0) continue;
+            local_t *L = &out[nl++]; memset(L, 0, sizeof *L);
+            snprintf(L->tid, sizeof L->tid, "%s", tid); snprintf(L->kind, sizeof L->kind, "parked");
+            snprintf(L->path, sizeof L->path, "%s/%s", parked[r], e->d_name);
+            if (S_ISREG(st.st_mode)) { L->bytes = (long long)st.st_size; snprintf(L->fmt, sizeof L->fmt, "%s", ext_of(e->d_name)); }
+        }
+        closedir(d);
+    }
     return nl;
 }
+
+// the copy ShadowMount launches for tid: a homebrew entry (starter / full / image) first, else a pkg install; parked never
+static local_t *active_copy(local_t *lo, int n, const char *tid) {
+    local_t *pkg = NULL;
+    for (int j = 0; j < n; j++) {
+        if (strcmp(lo[j].tid, tid)) continue;
+        if (!strcmp(lo[j].kind, "pkg")) { if (!pkg) pkg = &lo[j]; }
+        else if (strcmp(lo[j].kind, "parked")) return &lo[j];
+    }
+    return pkg;
+}
+static int plays_offline(const local_t *L) { return L && (!strcmp(L->kind, "full") || !strcmp(L->kind, "image") || !strcmp(L->kind, "pkg")); }
+
+// ---------------------------------------------------------------- downloads (docs/DOWNLOAD-TO-CONSOLE.md 3): two small TSV files
+// downloads.tsv = the app's requests, written ONLY by the main loop (bm_api_pass_begin). dl-status.tsv = mac1's progress, written
+// ONLY by mac1's download-to-console.py over FTP; the payload never writes it. Both are read here by the API thread.
+#define DL_REQ_PATH    "/data/blazing/downloads.tsv"
+#define DL_STATUS_PATH "/data/blazing/dl-status.tsv"
+#define DL_REQ_MAX     256
+#define DL_FIELDS      8
+typedef struct { char state[16]; long long done, total, eta, at; char msg[256]; } dljob_t;
+
+static int tsv_split(const char *l, size_t L, char f[][256], int maxf) {   // one line -> up to maxf tab fields (each cut at 255)
+    int k = 0; size_t o = 0;
+    if (maxf < 1) return 0;
+    f[0][0] = 0;
+    for (size_t i = 0; i < L; i++) {
+        if (l[i] == '\t') { f[k][o] = 0; if (++k >= maxf) return k; o = 0; f[k][0] = 0; continue; }
+        if (l[i] == '\r') continue;
+        if (o < 255) f[k][o++] = l[i];
+    }
+    f[k][o] = 0;
+    return k + 1;
+}
+
+// the LAST line of m whose field 0 is w0 (NULL = any) and field 1 is tid (NULL = any); 0 when none, else its field count
+static int tsv_last(const char *m, const char *w0, const char *tid, char f[][256]) {
+    int got = 0; char t[DL_FIELDS][256];
+    for (const char *l = m; l && *l; ) {
+        const char *nl = strchr(l, '\n'); size_t L = nl ? (size_t)(nl - l) : strlen(l);
+        if (L && l[0] != '#') {
+            int k = tsv_split(l, L, t, DL_FIELDS);
+            if (k >= 2 && (!w0 || !strcmp(t[0], w0)) && (!tid || !strcmp(t[1], tid))) { memcpy(f, t, sizeof t); got = k; }
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+    return got;
+}
+
+static int dl_job(const char *st, const char *tid, dljob_t *j) {     // this title's "job" line in dl-status.tsv
+    memset(j, 0, sizeof *j);
+    char f[DL_FIELDS][256];
+    if (!st || tsv_last(st, "job", tid, f) < 8) return 0;
+    snprintf(j->state, sizeof j->state, "%s", f[2]);
+    j->done = atoll(f[3]); j->total = atoll(f[4]); j->eta = atoll(f[5]); j->at = atoll(f[6]);
+    snprintf(j->msg, sizeof j->msg, "%s", f[7]);
+    return 1;
+}
+
+static int dl_job_active(const char *state) {
+    static const char *on[] = { "queued", "waiting", "sending", "verifying", "switching", "removing", 0 };
+    for (int i = 0; on[i]; i++) if (!strcmp(state, on[i])) return 1;
+    return 0;
+}
+
+static void dl_request(const char *rq, const char *tid, char *w, size_t wn, long long *at) {   // the app's newest request for tid
+    char f[DL_FIELDS][256];
+    w[0] = 0; *at = 0;
+    if (rq && tsv_last(rq, NULL, tid, f) >= 3) { snprintf(w, wn, "%s", f[0]); *at = atoll(f[2]); }
+}
+
+typedef struct { long long rate, rate_at, worker_at; char route[16]; int active; } dlsum_t;
+static void dl_summary(const char *st, dlsum_t *s) {
+    memset(s, 0, sizeof *s);
+    if (!st) return;
+    char f[DL_FIELDS][256];
+    if (tsv_last(st, "rate", NULL, f) >= 4) { s->rate = atoll(f[1]); s->rate_at = atoll(f[2]); snprintf(s->route, sizeof s->route, "%s", f[3]); }
+    if (tsv_last(st, "worker", NULL, f) >= 2) s->worker_at = atoll(f[1]);
+    for (const char *l = st; l && *l; ) {                          // each title once: its LAST job line is its state
+        const char *nl = strchr(l, '\n'); size_t L = nl ? (size_t)(nl - l) : strlen(l);
+        if (L > 4 && !strncmp(l, "job\t", 4) && tsv_split(l, L, f, DL_FIELDS) >= 2) {
+            char pre[24]; snprintf(pre, sizeof pre, "job\t%.9s\t", f[1]);
+            const char *first = strstr(st, pre);                   // count a title at its first line only
+            while (first && first != st && first[-1] != '\n') first = strstr(first + 1, pre);
+            dljob_t j;
+            if (first == l && dl_job(st, f[1], &j) && dl_job_active(j.state)) s->active++;
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+}
+
+static char *dl_slurp(const char *path) { char p[600]; return api_slurp(P(p, sizeof p, path), 64 * 1024, NULL); }
 
 // ---------------------------------------------------------------- the host's games (/games.json is flat objects: parse just that)
 typedef struct { char key[48], tid[16], title[256], version[32], fw[16], sdk[16], name[300]; long long size; } hg_t;
@@ -521,11 +656,36 @@ static void st_find(const char *m, const char *key, char *status, size_t sn, int
     }
 }
 
+// v2.8 fields of one library row (docs/DOWNLOAD-TO-CONSOLE.md 4.2): where it plays from, every copy, the app's request, mac1's progress
+static void api_row_dl(sb_t *o, const char *tid, const local_t *L, const char *rq, const char *st) {
+    sb_f(o, ",\"on_console\":%s,\"local_bytes\":%lld,\"copies\":[", plays_offline(L) ? "true" : "false", L ? L->bytes : 0LL);
+    int n = 0;
+    for (int j = 0; j < g_nloc; j++) {
+        if (strcmp(g_loc[j].tid, tid)) continue;
+        sb_puts(o, n++ ? ",{\"kind\":" : "{\"kind\":"); sb_js(o, g_loc[j].kind);
+        sb_puts(o, ",\"path\":"); sb_js(o, g_loc[j].path); sb_f(o, ",\"bytes\":%lld}", g_loc[j].bytes);
+    }
+    char w[16]; long long at; dl_request(rq, tid, w, sizeof w, &at);
+    sb_puts(o, "],\"request\":"); sb_js(o, w); sb_f(o, ",\"request_at\":%lld", at);
+    dljob_t j; dl_job(st, tid, &j);
+    sb_puts(o, ",\"dl_state\":"); sb_js(o, j.state);
+    sb_f(o, ",\"dl_done\":%lld,\"dl_total\":%lld,\"dl_eta\":%lld,\"dl_at\":%lld,\"dl_msg\":", j.done, j.total, j.eta, j.at); sb_js(o, j.msg);
+}
+
+static void pkg_title(const char *tid, char *out, size_t on) {   // a pkg install's name from /user/app/<TID>/sce_sys/param.json, else ""
+    out[0] = 0;
+    char rp[600], pj[700]; snprintf(pj, sizeof pj, "%s/%s/sce_sys/param.json", P(rp, sizeof rp, "/user/app"), tid);
+    char *m = api_slurp(pj, 1 << 18, NULL); if (!m) return;
+    char *t = strstr(m, "\"titleName\""); if (t) { t = strchr(t + 11, '"'); if (t) js_str(t, out, on); }
+    free(m);
+}
+
 static void api_library(sb_t *o) {
     conf_t c; read_conf(&c);
     int host_ok = host_games(&c, 10) == 0;
     host_proven(&c);
     g_nloc = scan_local(&c, g_loc, MAX_LOCAL);
+    char *rq = dl_slurp(DL_REQ_PATH), *dst = dl_slurp(DL_STATUS_PATH);
     choices_t *ch = malloc(sizeof *ch); choices_load(ch);
     char sp[600]; char *stm = api_slurp(P(sp, sizeof sp, STATE_PATH), 1 << 20, NULL);
     int cfw = console_fw(&c);
@@ -538,7 +698,8 @@ static void api_library(sb_t *o) {
         hg_t *g = &g_hg[i];
         int dupe = 0; for (int j = 0; j < i; j++) if (!strcmp(g_hg[j].tid, g->tid)) dupe = 1;
         if (dupe) continue;                                       // one row per title (the host's first image wins, as a pass does)
-        local_t *L = NULL; for (int j = 0; j < g_nloc; j++) if (!strcmp(g_loc[j].tid, g->tid)) { if (!L) L = &g_loc[j]; seen[j] = 1; }
+        for (int j = 0; j < g_nloc; j++) if (!strcmp(g_loc[j].tid, g->tid)) seen[j] = 1;
+        local_t *L = active_copy(g_loc, g_nloc, g->tid);
         char status[16], reason[240]; int tries; st_find(stm, g->key, status, sizeof status, &tries, reason, sizeof reason);
         const char *choice = choice_of(ch, g->tid);
         int gfw = fw_hundredths(g->fw);
@@ -568,32 +729,41 @@ static void api_library(sb_t *o) {
         sb_puts(o, ",\"choice\":"); sb_js(o, choice);
         sb_puts(o, ",\"build\":"); sb_js(o, status); sb_f(o, ",\"tries\":%d,\"reason\":", tries); sb_js(o, reason);
         sb_puts(o, ",\"proof\":"); sb_js(o, proof);
-        sb_f(o, ",\"pinned\":%s}", L && L->pinned ? "true" : "false");
+        sb_f(o, ",\"pinned\":%s", L && L->pinned ? "true" : "false");
+        api_row_dl(o, g->tid, L, rq, dst);
+        sb_puts(o, "}");
     }
     for (int j = 0; j < g_nloc; j++) {                            // on this console, not (or no longer) on the drives
         if (seen[j]) continue;
         int dupe = 0; for (int k = 0; k < j; k++) if (!strcmp(g_loc[k].tid, g_loc[j].tid)) dupe = 1;
         if (dupe) continue;
-        local_t *L = &g_loc[j];
+        local_t *L = active_copy(g_loc, g_nloc, g_loc[j].tid);
+        if (!L) continue;                                         // only parked: no row of its own (it shows in a row's copies)
         const char *nm = strrchr(L->path, '/'); nm = nm ? nm + 1 : L->path;
         char title[300]; snprintf(title, sizeof title, "%s", nm);
-        char *paren = strstr(title, " ("); if (paren) *paren = 0;
-        char *dot = strrchr(title, '.'); if (dot && !strcmp(L->kind, "image")) *dot = 0;
+        if (!strcmp(L->kind, "pkg")) pkg_title(L->tid, title, sizeof title);     // its own name; the folder name is only the title id
+        if (!title[0]) snprintf(title, sizeof title, "%s", L->tid);
+        else if (strcmp(L->kind, "pkg")) {
+            char *paren = strstr(title, " ("); if (paren) *paren = 0;
+            char *dot = strrchr(title, '.'); if (dot && !strcmp(L->kind, "image")) *dot = 0;
+        }
         char proof[300]; proven_line(L->tid, proof, sizeof proof);
         if (!first) sb_puts(o, ","); first = 0;
         sb_puts(o, "{\"tid\":"); sb_js(o, L->tid); sb_puts(o, ",\"title\":"); sb_js(o, title);
         sb_f(o, ",\"platform\":\"%s\",\"key\":\"\",\"version\":\"\",\"fw\":\"\",\"size\":%lld,\"format\":", !strncmp(L->tid, "CUSA", 4) ? "PS4" : "PS5", L->bytes);
-        sb_js(o, !strcmp(L->kind, "image") ? L->fmt : "folder");
+        sb_js(o, !strcmp(L->kind, "image") || !strcmp(L->kind, "pkg") ? L->fmt : "folder");
         sb_f(o, ",\"compressed\":%s,\"on_drives\":false,\"file\":\"\",\"local\":", !strcasecmp(L->fmt, "ffpfsc") ? "true" : "false");
         sb_js(o, L->kind); sb_puts(o, ",\"local_path\":"); sb_js(o, L->path);
         // a starter whose image left the drives cannot stream any more; a full copy or image plays on its own
         sb_puts(o, ",\"state\":"); sb_js(o, !strcmp(L->kind, "starter") ? "orphan" : "installed");
         sb_puts(o, ",\"choice\":"); sb_js(o, choice_of(ch, L->tid));
         sb_puts(o, ",\"build\":\"\",\"tries\":0,\"reason\":\"\",\"proof\":"); sb_js(o, proof);
-        sb_f(o, ",\"pinned\":%s}", L->pinned ? "true" : "false");
+        sb_f(o, ",\"pinned\":%s", L->pinned ? "true" : "false");
+        api_row_dl(o, L->tid, L, rq, dst);
+        sb_puts(o, "}");
     }
     sb_puts(o, "]}");
-    free(stm); free(ch);
+    free(stm); free(ch); free(rq); free(dst);
 }
 
 // ---------------------------------------------------------------- GET /api/status, /api/settings, /api/log
@@ -616,8 +786,137 @@ static void api_status(sb_t *o) {
     sb_puts(o, ",\"homebrew_dir\":"); sb_js(o, c.homebrew_dir);
     sb_puts(o, ",\"catalog_etag\":"); sb_js(o, g_catalog_etag);
     pthread_mutex_lock(&g_api_mu); sb_puts(o, ",\"discover_etag\":"); sb_js(o, g_disc_etag); pthread_mutex_unlock(&g_api_mu);
-    sb_f(o, ",\"free_mb\":{\"data\":%lld,\"ext0\":%lld,\"ext1\":%lld,\"usb0\":%lld},\"min_free_mb\":%lld,\"fork\":\"%.16s\"}",
+    sb_f(o, ",\"free_mb\":{\"data\":%lld,\"ext0\":%lld,\"ext1\":%lld,\"usb0\":%lld},\"min_free_mb\":%lld,\"fork\":\"%.16s\"",
          dir_free("/data"), dir_free("/mnt/ext0"), dir_free("/mnt/ext1"), dir_free("/mnt/usb0"), c.min_free_mb, BM_FORK_SHA);
+    char *st = dl_slurp(DL_STATUS_PATH); dlsum_t d; dl_summary(st, &d); free(st);   // mac1's download helper (DOWNLOAD-TO-CONSOLE.md 4.3)
+    sb_f(o, ",\"dl_rate\":%lld,\"dl_rate_at\":%lld,\"dl_worker_at\":%lld,\"dl_active\":%d}", d.rate, d.rate_at, d.worker_at, d.active);
+}
+
+// GET /api/downloads: what mac1's worker polls (every 20 s per console, so it stays small): the app's requests, mac1's own last
+// status as this console has it, and the space and route the worker plans with
+static void api_downloads(sb_t *o) {
+    conf_t c; read_conf(&c);
+    char *rq = dl_slurp(DL_REQ_PATH), *st = dl_slurp(DL_STATUS_PATH);
+    sb_f(o, "{\"version\":\"%s\",\"now\":%lld,\"requests\":[", BM_VERSION, (long long)time(NULL));
+    int n = 0; char f[DL_FIELDS][256];
+    for (const char *l = rq; l && *l; ) {
+        const char *nl = strchr(l, '\n'); size_t L = nl ? (size_t)(nl - l) : strlen(l);
+        if (L && l[0] != '#' && tsv_split(l, L, f, DL_FIELDS) >= 3 && valid_tid(f[1])) {
+            sb_puts(o, n++ ? ",{\"what\":" : "{\"what\":"); sb_js(o, f[0]); sb_puts(o, ",\"tid\":"); sb_js(o, f[1]);
+            sb_f(o, ",\"at\":%lld}", atoll(f[2]));
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+    dlsum_t d; dl_summary(st, &d);
+    sb_f(o, "],\"worker_at\":%lld,\"rate\":%lld,\"rate_at\":%lld,\"rate_route\":", d.worker_at, d.rate, d.rate_at); sb_js(o, d.route);
+    sb_puts(o, ",\"jobs\":[");
+    n = 0;
+    for (const char *l = st; l && *l; ) {                          // each title's last job line
+        const char *nl = strchr(l, '\n'); size_t L = nl ? (size_t)(nl - l) : strlen(l);
+        if (L > 4 && !strncmp(l, "job\t", 4) && tsv_split(l, L, f, DL_FIELDS) >= 2) {
+            char pre[24]; snprintf(pre, sizeof pre, "job\t%.9s\t", f[1]);
+            const char *first = strstr(st, pre);
+            while (first && first != st && first[-1] != '\n') first = strstr(first + 1, pre);
+            dljob_t j;
+            if (first == l && dl_job(st, f[1], &j)) {
+                sb_puts(o, n++ ? ",{\"tid\":" : "{\"tid\":"); sb_js(o, f[1]); sb_puts(o, ",\"state\":"); sb_js(o, j.state);
+                sb_f(o, ",\"done\":%lld,\"total\":%lld,\"eta\":%lld,\"at\":%lld,\"msg\":", j.done, j.total, j.eta, j.at); sb_js(o, j.msg);
+                sb_puts(o, "}");
+            }
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+    sb_f(o, "],\"free_mb\":{\"data\":%lld,\"ext0\":%lld,\"ext1\":%lld,\"usb0\":%lld},\"min_free_mb\":%lld,\"homebrew_dir\":",
+         dir_free("/data"), dir_free("/mnt/ext0"), dir_free("/mnt/ext1"), dir_free("/mnt/usb0"), c.min_free_mb);
+    sb_js(o, c.homebrew_dir);
+    sb_f(o, ",\"route\":\"%s\"}", g_route ? "TAILNET" : "LAN");
+    free(rq); free(st);
+}
+
+// ---------------------------------------------------------------- GET /api/sha256: hash a range of a STAGED file on the console
+// mac1 sends a game image in 1 GiB pieces and compares each against this, so a hotspot never carries the image twice
+// (DOWNLOAD-TO-CONSOLE.md 5.3). Only files under <drive>/blz-stage/incoming/ can be read, at most 1 GiB per call.
+typedef struct { uint32_t h[8]; uint64_t n; unsigned char b[64]; size_t bl; } sha256_t;
+static const uint32_t k_sha_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
+#define ROR32(x, r) (((x) >> (r)) | ((x) << (32 - (r))))
+static void sha256_block(sha256_t *s, const unsigned char *p) {
+    uint32_t w[64], a, b, c, d, e, f, g, h;
+    for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = ROR32(w[i - 15], 7) ^ ROR32(w[i - 15], 18) ^ (w[i - 15] >> 3), s1 = ROR32(w[i - 2], 17) ^ ROR32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3]; e = s->h[4]; f = s->h[5]; g = s->h[6]; h = s->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (ROR32(e, 6) ^ ROR32(e, 11) ^ ROR32(e, 25)) + ((e & f) ^ (~e & g)) + k_sha_k[i] + w[i];
+        uint32_t t2 = (ROR32(a, 2) ^ ROR32(a, 13) ^ ROR32(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+        h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    s->h[0] += a; s->h[1] += b; s->h[2] += c; s->h[3] += d; s->h[4] += e; s->h[5] += f; s->h[6] += g; s->h[7] += h;
+}
+static void sha256_init(sha256_t *s) {
+    static const uint32_t iv[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+    memcpy(s->h, iv, sizeof iv); s->n = 0; s->bl = 0;
+}
+static void sha256_update(sha256_t *s, const unsigned char *p, size_t n) {
+    s->n += n;
+    if (s->bl) { size_t t = 64 - s->bl < n ? 64 - s->bl : n; memcpy(s->b + s->bl, p, t); s->bl += t; p += t; n -= t; if (s->bl == 64) { sha256_block(s, s->b); s->bl = 0; } }
+    while (n >= 64) { sha256_block(s, p); p += 64; n -= 64; }
+    if (n) { memcpy(s->b, p, n); s->bl = n; }
+}
+static void sha256_hex(sha256_t *s, char out[65]) {
+    uint64_t bits = s->n * 8; unsigned char pad[72] = { 0x80 };
+    size_t pl = (s->bl < 56 ? 56 : 120) - s->bl;
+    for (int i = 0; i < 8; i++) pad[pl + i] = (unsigned char)(bits >> (56 - 8 * i));
+    uint64_t keep = s->n; sha256_update(s, pad, pl + 8); s->n = keep;
+    for (int i = 0; i < 8; i++) snprintf(out + 8 * i, 9, "%08x", s->h[i]);
+}
+
+#define SHA_MAX_LEN (1LL << 30)
+static int sha_path_ok(const char *p) {
+    static const char *ok[] = { "/data/blz-stage/incoming/", "/mnt/ext0/blz-stage/incoming/", "/mnt/ext1/blz-stage/incoming/",
+                                "/mnt/usb0/blz-stage/incoming/", "/mnt/usb1/blz-stage/incoming/", 0 };
+    int in = 0;
+    for (int i = 0; ok[i]; i++) if (!strncmp(p, ok[i], strlen(ok[i])) && p[strlen(ok[i])]) in = 1;
+    if (!in || strstr(p, "..") || strstr(p, "//") || strstr(p, "/./")) return 0;
+    for (const unsigned char *q = (const unsigned char *)p; *q; q++) if (*q < 0x20 || *q == 0x7f) return 0;
+    return 1;
+}
+static int api_sha256(sb_t *o, const char *query) {                 // the HTTP status; the JSON answer in o
+    char path[700] = "", v[32];
+    get_q(query, "path", path, sizeof path);
+    long long off = get_q(query, "off", v, sizeof v) ? atoll(v) : 0, len = get_q(query, "len", v, sizeof v) ? atoll(v) : -1;
+    if (!path[0] || off < 0 || (len < -1)) { sb_puts(o, "{\"error\":\"path, off and len (bytes) please\"}"); return 400; }
+    if (!sha_path_ok(path)) { sb_puts(o, "{\"error\":\"only files under <drive>/blz-stage/incoming/ can be hashed\"}"); return 403; }
+    char fp[800]; int fd = open(P(fp, sizeof fp, path), O_RDONLY);
+    struct stat sb;
+    if (fd < 0 || fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) { if (fd >= 0) close(fd); sb_puts(o, "{\"error\":\"no such file\"}"); return 404; }
+    long long size = (long long)sb.st_size;
+    if (off > size) off = size;
+    if (len < 0 || len > size - off) len = size - off;
+    if (len > SHA_MAX_LEN) len = SHA_MAX_LEN;
+    size_t bufn = 1 << 20; unsigned char *buf = malloc(bufn);       // heap: the API thread's stack is 1 MB
+    if (!buf) { close(fd); sb_puts(o, "{\"error\":\"out of memory\"}"); return 500; }
+    sha256_t s; sha256_init(&s);
+    long long done = 0;
+    while (done < len) {
+        size_t want = (size_t)(len - done < (long long)bufn ? len - done : (long long)bufn);
+        ssize_t n = pread(fd, buf, want, (off_t)(off + done));
+        if (n <= 0) break;
+        sha256_update(&s, buf, (size_t)n); done += n;
+    }
+    free(buf); close(fd);
+    if (done != len) { sb_puts(o, "{\"error\":\"read failed\"}"); return 500; }
+    char hex[65]; sha256_hex(&s, hex);
+    sb_puts(o, "{\"path\":"); sb_js(o, path);
+    sb_f(o, ",\"off\":%lld,\"len\":%lld,\"size\":%lld,\"sha256\":\"%s\"}", off, len, size, hex);
+    return 200;
 }
 
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
@@ -699,7 +998,7 @@ static int api_icon(const char *tid, char **png, size_t *len) {
 
 // ---------------------------------------------------------------- actions (queued here, applied by the main loop)
 static const char *api_enqueue(const char *what, const char *tid, const char *key, const char *value) {
-    static const char *ok[] = { "install", "remove", "rebuild", "hide", "unhide", "sync", "auto", "set", 0 };
+    static const char *ok[] = { "install", "remove", "rebuild", "hide", "unhide", "sync", "auto", "set", "download", "remove_local", "cancel_dl", 0 };
     int good = 0; for (int i = 0; ok[i]; i++) if (!strcmp(ok[i], what)) good = 1;
     if (!good) return "unknown action";
     int needs_tid = strcmp(what, "sync") && strcmp(what, "auto") && strcmp(what, "set");
@@ -762,6 +1061,31 @@ static void conf_set_key(const char *key, const char *value) {  // main thread: 
     free(s.b);
 }
 
+// main thread: the app's download request for tid -> downloads.tsv, one line per title (the newest replaces the older), at most
+// DL_REQ_MAX lines (the oldest go first). mac1's worker reads it through GET /api/downloads; nothing on the console acts on it.
+static void downloads_set(const char *tid, const char *word) {
+    char p[600]; char *m = api_slurp(P(p, sizeof p, DL_REQ_PATH), 64 * 1024, NULL);
+    char (*keep)[300] = malloc(sizeof *keep * DL_REQ_MAX); int n = 0; char f[DL_FIELDS][256];
+    if (!keep) { free(m); logf_("ui: downloads.tsv not written (out of memory)"); return; }
+    for (const char *l = m; l && *l; ) {
+        const char *nl = strchr(l, '\n'); size_t L = nl ? (size_t)(nl - l) : strlen(l);
+        if (L && l[0] != '#' && tsv_split(l, L, f, DL_FIELDS) >= 3 && valid_tid(f[1]) && strcmp(f[1], tid)) {
+            if (n == DL_REQ_MAX - 1) { memmove(keep[0], keep[1], sizeof keep[0] * (DL_REQ_MAX - 2)); n--; }
+            snprintf(keep[n++], sizeof keep[0], "%.20s\t%s\t%lld", f[0], f[1], atoll(f[2]));
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+    free(m);
+    sb_t s = { 0 };
+    sb_puts(&s, "# BlazingMount download requests (written by the payload; read by mac1's download-to-console.py)\n");
+    for (int i = 0; i < n; i++) sb_f(&s, "%s\n", keep[i]);
+    free(keep);
+    sb_f(&s, "%s\t%s\t%lld\n", word, tid, (long long)time(NULL));
+    char dp[600], t[640]; makedirs(P(dp, sizeof dp, "/data/blazing")); snprintf(t, sizeof t, "%s.tmp", p);
+    if (write_file(t, s.b, s.n) == 0) rename(t, p);
+    free(s.b);
+}
+
 // main thread, start of every pass (after read_conf): apply the queue, then fold the choices into this pass's conf
 static void bm_api_pass_begin(conf_t *c) {
     bm_act_t q[API_MAXQ]; int n;
@@ -794,6 +1118,11 @@ static void bm_api_pass_begin(conf_t *c) {
             conf_set_key(a->key, a->value); conf_changed = 1; api_recent("setting %s = %s", a->key, a->value);
         } else if (!strcmp(a->what, "sync")) {
             api_recent("check the drives now");
+        } else if (!strcmp(a->what, "download") || !strcmp(a->what, "remove_local") || !strcmp(a->what, "cancel_dl")) {
+            const char *word = !strcmp(a->what, "cancel_dl") ? "cancel" : a->what;
+            downloads_set(a->tid, word);
+            api_recent("%s %s: asked mac1's download helper", !strcmp(word, "download") ? "download" : !strcmp(word, "cancel") ? "cancel download of"
+                       : "remove the local copy of", a->tid);
         }
     }
     if (n) choices_save(ch);
@@ -852,6 +1181,8 @@ static void api_handle(int s) {
     if (!strcmp(method, "GET") && !strcmp(target, "/api/status")) { api_status(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/library")) { api_library(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/settings")) { api_settings(&b); reply_json(s, 200, &b); }
+    else if (!strcmp(method, "GET") && !strcmp(target, "/api/downloads")) { api_downloads(&b); reply_json(s, 200, &b); }
+    else if (!strcmp(method, "GET") && !strcmp(target, "/api/sha256")) { int code = api_sha256(&b, query); reply_json(s, code, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/log")) {
         char v[16]; int n = get_q(query, "lines", v, sizeof v) ? atoi(v) : 200; if (n < 1) n = 1; if (n > 2000) n = 2000;
         api_log(&b, n); reply_json(s, 200, &b);

@@ -15,8 +15,13 @@ host/api_hooks.py are applied to a temp copy), runs it resident against a fake c
   7. DISCOVER: /api/discover + /api/wishlist + dsheet covers pass through; a wish press is forwarded at once to the host's POST /wishlist
      with X-BM-Request (bad ids refused, a host refusal reported); the host's alerts raise ONE notice each per pass, never twice (304,
      same alerts under a new ETag), a new alert raises one more, and alerts-seen.tsv stays capped at 200 lines
+  8. DOWNLOAD TO CONSOLE (v2.8, docs/DOWNLOAD-TO-CONSOLE.md): every copy of a title in copies[] (starter, pkg install, parked image),
+     on_console only for a copy that plays without the network (a starter over a pkg install = the Wolverine case: still streams);
+     a title the console has as a pkg is never built (auto on); download / cancel_dl land in downloads.tsv as ONE line per title;
+     mac1's dl-status.tsv shows in /api/library, /api/status and /api/downloads (the last job line wins); /api/sha256 hashes a
+     range of a staged file exactly like hashlib and refuses anything outside <drive>/blz-stage/incoming/
 """
-import hashlib, http.server, urllib.error, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
+import hashlib, http.server, urllib.error, urllib.parse, json, os, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "..", "console", "blazingmountd", "src")
@@ -241,6 +246,74 @@ def main():
         check(wait(lambda: row("PPSA90004")["state"] == "installed", 30), "... and is built with no request (auto on)")
         check(j("/api/status")["gen"] > gen, "gen moved (the app knows to refresh)")
         check(any("game list changed" in l for l in j("/api/log?lines=200")["lines"]), "the watch logged the change")
+        # 8) DOWNLOAD TO CONSOLE
+        def put(rel, data):
+            fp = os.path.join(root, rel); os.makedirs(os.path.dirname(fp), exist_ok=True); open(fp, "wb").write(data); return fp
+        put("mnt/ext1/user/app/PPSA90004/app.pkg", b"P" * 4096)                      # Delta: a starter (built above) AND a pkg install
+        r4 = row("PPSA90004")
+        kinds = sorted(c["kind"] for c in r4["copies"])
+        check(kinds == ["pkg", "starter"] and r4["local"] == "starter" and r4["on_console"] is False,
+              "starter over a pkg install: both in copies[], the starter is active, so it still streams (%r)" % kinds)
+        put("mnt/ext1/blz-stage/parked/Alpha Game (PPSA90001).ffpfsc", b"I" * 5000)
+        r1 = row("PPSA90001")
+        check([c["kind"] for c in r1["copies"]] == ["parked"] and r1["on_console"] is False and r1["local"] == "none",
+              "a parked image is listed, never active")
+        check(row("PPSA90002")["on_console"] is True and row("PPSA90002")["local_bytes"] >= 0, "a full copy plays on the console")
+        EPS = game("PPSA90005", "Epsilon Pkg")
+        put("user/app/PPSA90005/app.pkg", b"Q" * 8192)
+        put("user/app/PPSA90005/sce_sys/param.json", json.dumps({"titleName": "Epsilon Pkg"}).encode())
+        GAMES.append(EPS)
+        check(wait(lambda: row("PPSA90005") is not None, 20), "Epsilon (pkg-installed here) appears")
+        time.sleep(3)
+        r5 = row("PPSA90005")
+        check(r5["local"] == "pkg" and r5["on_console"] is True and r5["format"] == "ffpfsc" and r5["local_bytes"] == 8192
+              and not any("PPSA90005" in n for n in os.listdir(hb)), "a pkg-installed title is on_console and never gets a starter (auto on): %r %r"
+              % ({k: r5.get(k) for k in ("local", "on_console", "format", "local_bytes", "state", "copies")}, [n for n in os.listdir(hb) if "90005" in n]))
+        put("mnt/ext1/user/app/PPSA80001/app.pkg", b"R" * 100)
+        put("user/app/PPSA80001/sce_sys/param.json", json.dumps({"titleName": "Only Here Pkg"}).encode())
+        r8 = row("PPSA80001")
+        check(r8 and r8["local"] == "pkg" and r8["format"] == "pkg" and r8["on_console"] is True, "a pkg the host does not have: its own row, format pkg")
+        # the app's request
+        check(act("do=download&tid=PPSA90001", header=False)[0] == 403 and act("do=download&tid=../x")[0] == 400, "download: no header / bad id refused")
+        check(act("do=download&tid=PPSA90001")[0] == 200, "download queued")
+        dlp = os.path.join(b, "downloads.tsv")
+        rows_of = lambda: [l.split("\t") for l in open(dlp).read().splitlines() if l and not l.startswith("#")]
+        check(wait(lambda: [r[:2] for r in rows_of()] == [["download", "PPSA90001"]]), "downloads.tsv: one download line")
+        check(row("PPSA90001")["request"] == "download" and row("PPSA90001")["request_at"] > 0, "/api/library shows the request")
+        act("do=download&tid=PPSA90003"); act("do=cancel_dl&tid=PPSA90001")
+        check(wait(lambda: sorted(r[:2] for r in rows_of()) == [["cancel", "PPSA90001"], ["download", "PPSA90003"]]),
+              "cancel_dl replaces the title's line (word 'cancel'), other titles kept")
+        d = j("/api/downloads")
+        check(sorted((x["what"], x["tid"]) for x in d["requests"]) == [("cancel", "PPSA90001"), ("download", "PPSA90003")]
+              and d["homebrew_dir"].endswith("/homebrew") and "ext1" in d["free_mb"], "/api/downloads: requests, space, homebrew drive")
+        # mac1's status file
+        now = int(time.time())
+        open(os.path.join(b, "dl-status.tsv"), "w").write(
+            "worker\t%d\t0.1\nrate\t850000\t%d\tTAILNET\n" % (now, now) +
+            "job\tPPSA90003\tsending\t100\t1000\t60\t%d\tpiece 1 of 3 verified\n" % now +
+            "job\tPPSA90003\tverifying\t1000\t1000\t0\t%d\tchecking piece 3\n" % now)
+        r3 = row("PPSA90003")
+        check(r3["dl_state"] == "verifying" and r3["dl_done"] == 1000 and r3["dl_total"] == 1000 and r3["dl_msg"] == "checking piece 3",
+              "/api/library: the title's LAST job line")
+        st = j("/api/status")
+        check(st["dl_rate"] == 850000 and st["dl_worker_at"] == now and st["dl_active"] == 1, "/api/status: rate, worker heartbeat, 1 active job")
+        d = j("/api/downloads")
+        check(len(d["jobs"]) == 1 and d["jobs"][0]["state"] == "verifying" and d["worker_at"] == now and d["rate_route"] == "TAILNET",
+              "/api/downloads: one job per title, worker + rate")
+        # the console's own hash of a staged range
+        blob = os.urandom(3 * 1024 * 1024 + 17)
+        put("mnt/ext1/blz-stage/incoming/x.ffpfsc.part", blob)
+        q = lambda **kw: "/api/sha256?" + urllib.parse.urlencode(kw)
+        hp = "/mnt/ext1/blz-stage/incoming/x.ffpfsc.part"
+        r = j(q(path=hp, off=1000, len=2000000))
+        check(r["sha256"] == hashlib.sha256(blob[1000:2001000]).hexdigest() and r["len"] == 2000000 and r["size"] == len(blob),
+              "/api/sha256 of a range = hashlib")
+        check(j(q(path=hp))["sha256"] == hashlib.sha256(blob).hexdigest(), "/api/sha256 without off/len = the whole file")
+        r = j(q(path=hp, off=len(blob) - 5, len=100))
+        check(r["len"] == 5 and r["sha256"] == hashlib.sha256(blob[-5:]).hexdigest(), "a range past the end is cut at the end")
+        check(code(q(path="/data/blazing/mount.conf")) == 403 and code(q(path="/mnt/ext1/blz-stage/incoming/../../../data/blazing/mount.conf")) == 403
+              and code(q(path="/mnt/ext1/blz-stage/incoming/")) == 403, "/api/sha256 refuses paths outside incoming/ and '..'")
+        check(code(q(path="/mnt/ext1/blz-stage/incoming/none.part")) == 404 and code("/api/sha256") == 400, "missing file 404, no path 400")
     finally:
         if proc:
             proc.terminate(); proc.wait(5)
