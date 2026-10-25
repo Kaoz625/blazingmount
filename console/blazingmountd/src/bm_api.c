@@ -396,6 +396,10 @@ static int scan_local(const conf_t *c, local_t *out, int max) {
                 if (m) { char *t = strstr(m, "\"titleId\""); if (t) { char one[64]; snprintf(one, sizeof one, "%.40s", t); first_tid(one, tid); } free(m); }
             }
             if (!tid[0]) continue;
+            if (S_ISDIR(st.st_mode)) {                                // a game folder has an eboot.bin; a DLC pkg drop
+                char eb[1500]; snprintf(eb, sizeof eb, "%s/eboot.bin", full);   // ("FC 27 DLC (PPSA34015)") or a backport
+                if (!exists(eb)) continue;                            // overlay ("PPSA25642-8xx") is no copy of the game
+            }
             local_t *L = &out[nl]; memset(L, 0, sizeof *L);
             snprintf(L->tid, sizeof L->tid, "%s", tid);
             snprintf(L->path, sizeof L->path, "%s/%s", roots[r], e->d_name);

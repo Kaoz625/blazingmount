@@ -125,6 +125,9 @@ def main():
         # 2) the fake console: Alpha's full copy is NOT here; a foreign full copy of Beta; an image file of another title
         root = os.path.join(work, "console"); b = os.path.join(root, "data", "blazing"); hb = os.path.join(root, "data", "homebrew")
         os.makedirs(b); os.makedirs(os.path.join(hb, "Some Full Copy (PPSA90002)", "sce_sys"))
+        open(os.path.join(hb, "Some Full Copy (PPSA90002)", "eboot.bin"), "wb").write(b"ELF")
+        os.makedirs(os.path.join(hb, "Gamma DLC (PPSA90003)"))                 # a DLC pkg drop (PHAT5's FC 27 DLC folder): no game
+        open(os.path.join(hb, "Gamma DLC (PPSA90003)", "UP0000-PPSA90003_00-UNLOCK.pkg"), "wb").write(b"x" * 10)
         open(os.path.join(hb, "Old Thing (PPSA80000).ffpfsc"), "wb").write(b"x" * 100)
         open(os.path.join(b, "mount.conf"), "w").write("host 127.0.0.1\nport %d\nmin_free_mb 0\ntsnet 0\nfw 10.20\npoll_secs 3600\n" % hport)
         open(os.path.join(b, "choices.tsv"), "w").write("auto\t0\n")
@@ -161,12 +164,13 @@ def main():
         check(rows["PPSA90001"]["format"] == "ffpfsc" and rows["PPSA90001"]["compressed"] is True, "file type + compressed")
         check(rows["PPSA90002"]["local"] == "full" and rows["PPSA90002"]["state"] == "installed", "a full copy is 'installed', kind 'full'")
         check(rows["PPSA90003"]["state"] == "needs_fw", "needs newer FW than the console")
+        check(rows["PPSA90003"]["local"] == "none" and not rows["PPSA90003"].get("on_console"), "a folder without eboot.bin (DLC drop) is no full copy")
         check(rows["PPSA80000"]["local"] == "image" and rows["PPSA80000"]["on_drives"] is False, "an image file on the console only")
         s = j("/api/settings")
         check(any(k["key"] == "conns" for k in s["keys"]) and s["auto"] == 0, "/api/settings lists the keys + auto")
         check(get("/api/icon/PPSA90001").startswith(b"\x89PNG"), "/api/icon from the host (cached after)")
         check(os.path.exists(os.path.join(b, "icons", "PPSA90001.png")), "icon cached on the console")
-        check(any("pass:" in l for l in j("/api/log?lines=50")["lines"]), "/api/log tail")
+        check(wait(lambda: any("pass:" in l for l in j("/api/log?lines=50")["lines"])), "/api/log tail")   # the first pass may still run
         check(wait(lambda: j("/api/status")["catalog_etag"] == "cat0001"), "status carries the host's whole-library ETag")
         cat = j("/api/catalog")
         check(cat["count"] == 2 and cat["games"][1]["system"] == "ps2", "/api/catalog passes the host's library.json through")
@@ -224,7 +228,8 @@ def main():
         os.rmdir(sand)
         act("do=remove&tid=PPSA90001")
         check(wait(lambda: not os.path.exists(sdir)), "remove: starter folder deleted")
-        check(not os.path.exists(os.path.join(b, "link", "PPSA90001.cfg")) and row("PPSA90001")["choice"] == "skip", "remove: cfg gone, choice skip")
+        check(wait(lambda: not os.path.exists(os.path.join(b, "link", "PPSA90001.cfg")) and row("PPSA90001")["choice"] == "skip"),
+              "remove: cfg gone, choice skip")                     # the cfg unlink + choices.tsv come after the folder delete
         time.sleep(1)
         check(not os.path.exists(sdir), "a removed game is not rebuilt by the next pass")
         act("do=remove&tid=PPSA90002")
