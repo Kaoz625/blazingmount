@@ -66,9 +66,9 @@ Next step: when Markus next streams a game away, `tail -f ~/.claude-team/ai-note
 Key files: ~/.blazing/live-speed/ (monitor.py, bench_*.py, backup/), PHAT5 /data/blazing/mount.conf (+ proxy 127.0.0.1 14451), /data/tailscale/config.json (forward 14451), mac1 /Library/LaunchDaemons/com.nyctailblazers.tcp-tuning.plist
 Blockers: DIGI5 wedged (claude-nyc-info) - needs the same forward + mount.conf line later; upstream ps5-tailscale MaxIdleConnsPerHost issue and the MacBook's 2.5 MB/s background download both need Markus's OK.
 
-### dl-local lane (download to console), 25 Oct 2026 ~11:40
+### dl-local lane (download to console), 25 Oct 2026 ~11:45
 Working on: games on PHAT5's own M.2 (play without the network) + the app's Download to console / Remove local copy.
-Last action: pushed remove-local + prove + app 0.5.1 (cfb2f48); built payload 2.8-38fe482.fdefd666f (mac2) + app 0.5.1 zip (Dell), NOT installed.
+Last action: pushed remove-local + prove + app 0.5.1 (cfb2f48); built payload 2.8-38fe482.fdefd666f (mac2) + app 0.5.1 zip (Dell), NOT installed. Requiem PPSA31246 switched to local 11:37; passive prove running.
 Next step: when mac1 load < 10 run the independent review (handoff section 4), then install on both consoles when idle (section 3).
 Key files: host/download-to-console.py, host/test_download_to_console.py, docs/DOWNLOAD-TO-CONSOLE.md, app/src/bm_app.h, console/blazingmountd/src/bm_api.c
 Blockers: review helper refused by the mac1 load cap; consoles busy. Full state: ~/.claude-team/handoffs/download-local.md
