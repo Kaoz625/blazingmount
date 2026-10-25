@@ -1567,16 +1567,25 @@ def cmd_serve(args):
     """Answers the app: every --poll seconds GET /api/downloads of each console; a new `download` request starts a `get` run,
     `remove_local` a `remove-local --confirm` run (at most --max runs at once per console, one per title), `cancel` stops that
     title's run and deletes its staged files. dl-status.tsv goes back to the console each round, so the app shows progress."""
-    cons = [Console(t) for t in [args.console] + list(args.tid)]
+    names, found, missed = [args.console] + list(args.tid), {}, {}
     seenp = os.path.join(HOME, "serve-seen.json")
     try:
         seen = json.load(open(seenp))
     except (OSError, ValueError):
         seen = {}
     procs, cancelled = {}, set()
-    log("serve: watching %s (poll %ds, at most %d runs per console)" % (", ".join(c.name for c in cons), args.poll, args.max))
+    log("serve: watching %s (poll %ds, at most %d runs per console)" % (", ".join(names), args.poll, args.max))
     while True:
-        for con in cons:
+        for n in names:                                       # a console asleep or away is looked for again every round;
+            if n not in found:                                # it never stops the others from being served
+                try:
+                    found[n] = Console(n)
+                    log("serve: %s found at %s" % (found[n].name, found[n].ip))
+                except SystemExit as e:
+                    if time.time() - missed.get(n, 0) > 600:
+                        log("serve: %s not reachable from here (%s); looking again each round" % (n, e))
+                        missed[n] = time.time()
+        for con in [found[n] for n in names if n in found]:
             try:
                 d = json.loads(http(con.api + "/api/downloads", timeout=20))
             except (urllib.error.URLError, OSError, ValueError):
@@ -1624,7 +1633,7 @@ def cmd_serve(args):
                 log("serve: %s: dl-status not written (%s)" % (con.name, e))
         if args.once:
             if all(p.poll() is not None for p in procs.values()) and not cancelled:
-                for con in cons:                              # the last word: every run's final state
+                for con in found.values():                    # the last word: every run's final state
                     try:
                         put_status(con, status_tsv(con, ((con.status() or {}).get("route") or "?")))
                     except NET_ERRORS:
