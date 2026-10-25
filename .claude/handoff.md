@@ -65,3 +65,10 @@ Last action: measured 8 vs 16 link connections and 1 MiB requests (n=10): no sig
 Next step: when Markus next streams a game away, `tail -f ~/.claude-team/ai-notes/away-speed.tsv` (new_conns should be ~0), then pull /data/blazing/link/<TID>.log from PHAT5 and compare "remote http ... avg us" with 1.2-2.3 s per request before the 20:35 forward fix.
 Key files: ~/.blazing/live-speed/ (monitor.py, bench_*.py, backup/), PHAT5 /data/blazing/mount.conf (+ proxy 127.0.0.1 14451), /data/tailscale/config.json (forward 14451), mac1 /Library/LaunchDaemons/com.nyctailblazers.tcp-tuning.plist
 Blockers: DIGI5 wedged (claude-nyc-info) - needs the same forward + mount.conf line later; upstream ps5-tailscale MaxIdleConnsPerHost issue and the MacBook's 2.5 MB/s background download both need Markus's OK.
+
+### dl-local lane (download to console), 24 Oct 2026 ~21:35
+Working on: copying games Markus picks onto PHAT5's own M.2 so they play without the network (he is away on a phone hotspot).
+Last action: app 0.5.0 (473ecef, Dell zip sha eddbea19) staged on PHAT5; mac1 Terminal ~/.blazing/download-local/when-idle-install.command installs payload 2.8 + app 0.5.0 once PHAT5 runs no game.
+Next step: `python3 host/download-to-console.py status; tail -20 ~/.blazing/download-local/install-bm28.log ~/.blazing/download-local/install-app050.log`
+Key files: host/download-to-console.py, host/test_download_to_console.py, docs/DOWNLOAD-TO-CONSOLE.md, app/src/bm_app.h, console/blazingmountd/src/bm_api.c
+Blockers: none (FC27 update blocked on a FW 14.00 backport, see ~/.claude-team/handoffs/download-local.md). Full state: ~/.claude-team/handoffs/download-local.md
