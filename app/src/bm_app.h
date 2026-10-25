@@ -55,6 +55,10 @@ struct Game {
   long long size = 0;
   bool compressed = false, onDrives = false, pinned = false;
   int tries = 0;
+  // v2.8 (docs/DOWNLOAD-TO-CONSOLE.md): plays without the network? every copy; the app's request; mac1's download progress
+  bool onConsole = false;
+  long long localBytes = 0, requestAt = 0, dlDone = 0, dlTotal = 0, dlEta = 0, dlAt = 0;
+  std::string copies, request, dlState, dlMsg;
 };
 
 struct Setting {
@@ -66,13 +70,14 @@ enum class Filter { kAll, kOnConsole, kNotInstalled, kProblems, kHidden, kPs5, k
 
 // The whole library (Markus 24 Oct: everything he owns, every system): L2/R2 walk the systems, OPTIONS what to show, TOUCH PAD grid/list
 enum class Group { kAll, kPs5, kPs4, kPs3, kPs2, kPsClassic, kSwitch, kNintendo, kXbox, kPc, kSega, kRetro, kMobile, kCount };
-enum class Show { kEverything, kPlayable, kOnDrives, kOnConsole, kNotOnDrives, kAttention, kHidden, kCount };
+enum class Show { kEverything, kPlayable, kOnDrives, kOnConsole, kStreams, kNotOnDrives, kAttention, kHidden, kCount };
 inline const char* GroupName(Group g) {
   static const char* n[] = {"All", "PS5", "PS4", "PS3", "PS2", "PS1 / PSP / Vita", "Switch", "Nintendo", "Xbox", "PC", "Sega", "Retro", "Mobile"};
   return n[int(g)];
 }
 inline const char* ShowName(Show s) {
-  static const char* n[] = {"Everything I own", "Playable now", "On my drives", "On this console", "Not on my drives", "Needs attention", "Hidden"};
+  static const char* n[] = {"Everything I own", "Playable now", "On my drives", "On this console", "Streams from mac1", "Not on my drives", "Needs attention",
+                            "Hidden"};
   return n[int(s)];
 }
 inline Group GroupOf(const std::string& sys, const std::string& family) {
@@ -129,11 +134,27 @@ struct Badge {
   const char* text;
   int tone;   // 0 dim outline, 1 green outline (good), 2 red outline (needs you), 3 solid red (live: building/playing)
 };
+inline bool DlActive(const std::string& st) {
+  return st == "queued" || st == "waiting" || st == "sending" || st == "verifying" || st == "switching" || st == "removing";
+}
+inline const char* DlPercent(long long done, long long total) {   // "DOWNLOADING 37%": 101 fixed strings, so a Badge can point at one
+  static std::string pct[101];
+  const int p = total > 0 ? int(std::clamp(done * 100 / total, 0LL, 100LL)) : 0;
+  if (pct[p].empty()) pct[p] = "DOWNLOADING " + std::to_string(p) + "%";
+  return pct[p].c_str();
+}
 inline Badge BadgeOf(const Game& g) {
   const std::string& s = g.state;
   if (s == "playing") return {"PLAYING", 3};
   if (s == "building") return {"BUILDING", 3};
-  if (s == "installed") return {g.local == "starter" ? "STREAMING" : g.local == "image" ? "IMAGE" : "FULL COPY", 1};
+  if (g.dlState == "sending") return {DlPercent(g.dlDone, g.dlTotal), 3};
+  if (g.dlState == "verifying") return {"CHECKING COPY", 3};
+  if (g.dlState == "switching") return {"SWITCHING", 3};
+  if (g.dlState == "queued" || g.dlState == "waiting") return {"DOWNLOAD WAITS", 0};
+  if (g.dlState == "failed" && g.request == "download") return {"DOWNLOAD FAILED", 2};
+  if (g.request == "download" && g.dlState.empty()) return {"DOWNLOAD ASKED", 0};
+  if (g.onConsole) return {"ON CONSOLE", 1};
+  if (s == "installed") return {g.local == "starter" ? "STREAMS" : g.local == "image" ? "IMAGE" : "FULL COPY", g.local == "starter" ? 0 : 1};
   if (s == "outdated") return {"OLD IMAGE", 2};
   if (s == "orphan") return {"NOT ON DRIVES", 2};
   if (s == "queued") return {"QUEUED", 0};
@@ -199,6 +220,17 @@ class App {
         g.build = j["build"].str(); g.reason = j["reason"].str(); g.proof = j["proof"].str();
         g.size = j["size"].ll(); g.compressed = j["compressed"].truthy(); g.onDrives = j["on_drives"].truthy();
         g.pinned = j["pinned"].truthy(); g.tries = (int)j["tries"].ll();
+        g.onConsole = j["on_console"].ok() ? j["on_console"].truthy() : (g.local == "full" || g.local == "image");
+        g.localBytes = j["local_bytes"].ll();
+        for (const auto& cp : j["copies"].items) {
+          const std::string k = cp["kind"].str(), path = cp["path"].str();
+          if (k == "starter") continue;                     // the starter is what "Streams" already says
+          const char* drive = path.rfind("/mnt/ext1", 0) == 0 ? "M.2" : path.rfind("/mnt/ext0", 0) == 0 ? "extended" : path.rfind("/mnt/usb", 0) == 0 ? "USB" : "console storage";
+          g.copies += (g.copies.empty() ? "" : ", ") + (k == "pkg" ? "installed game" : k == "parked" ? "parked image" : k) + " (" + drive + ")";
+        }
+        g.request = j["request"].str(); g.requestAt = j["request_at"].ll();
+        g.dlState = j["dl_state"].str(); g.dlMsg = j["dl_msg"].str();
+        g.dlDone = j["dl_done"].ll(); g.dlTotal = j["dl_total"].ll(); g.dlEta = j["dl_eta"].ll(); g.dlAt = j["dl_at"].ll();
         games_.push_back(std::move(g));
       }
       haveLibrary_ = true;
@@ -375,7 +407,7 @@ class App {
   double now_ = 0, nextStatus_ = 0, nextLibrary_ = 0, nextLog_ = 0, toastUntil_ = 0;
   struct Confirm {
     bool active = false;
-    std::string action, tid, title, body, yes;
+    std::string action, tid, title, body, yes, altAction, alt;   // alt: a second choice on SQUARE (empty = none)
   } confirm_;
   // ---- DISCOVER (docs/UI-DESIGN.md 10.5): games he does not have yet, his wishlist, release alerts
   struct DShelf { std::string key, label; std::vector<int> items; };
@@ -470,7 +502,8 @@ class App {
       case Show::kEverything: return !(g && g->choice == "skip");
       case Show::kPlayable: return it.streamable || it.files > 0 || (g && g->local != "none");
       case Show::kOnDrives: return it.files > 0 || it.streamable;
-      case Show::kOnConsole: return g && g->local != "none";
+      case Show::kOnConsole: return g && g->onConsole;
+      case Show::kStreams: return g && g->local == "starter" && !g->onConsole;
       case Show::kNotOnDrives: return it.files == 0 && !it.streamable;
       case Show::kAttention: return g && IsProblem(*g);
       case Show::kHidden: return g && g->choice == "skip";
@@ -548,9 +581,11 @@ class App {
     }
     if (b == kCross) {
       if (g->state == "playing") Toast(g->title + " is running: close it first");
-      else if (g->local == "starter") Ask_("remove", *g, "Remove " + g->title + "?",
-                                           "Its starter is deleted from this console. The game stays on your drives: Install brings it back.", "Remove");
-      else if (g->local == "full" || g->local == "image") Toast("A full copy or image: BlazingMount leaves it alone");
+      else if (DlActive(g->dlState) || (g->request == "download" && g->dlState.empty()))
+        Ask_("cancel_dl", *g, "Stop downloading " + g->title + "?",
+             "What arrived so far is deleted from this console. The game keeps streaming from mac1.", "Stop download");
+      else if (g->onConsole) Toast(g->title + " plays from this console" + (g->copies.empty() ? "" : ": " + g->copies));
+      else if (g->local == "starter") AskDownload(*g);
       else if (g->state == "needs_fw") Toast(g->title + " needs FW " + g->fw + " (this console: " + consoleFw_ + ")");
       else if (g->state == "building") Toast("Being built right now");
       else { Act("install", g->tid); Toast("Install " + g->title + ": queued"); }
@@ -562,11 +597,38 @@ class App {
       else { Act("hide", g->tid); Toast("Hidden: " + g->title + " will not be built"); }
     }
   }
-  void Ask_(const std::string& action, const Game& g, const std::string& title, const std::string& body, const std::string& yes) {
-    confirm_ = {true, action, g.tid, title, body, yes};
+  void Ask_(const std::string& action, const Game& g, const std::string& title, const std::string& body, const std::string& yes,
+            const std::string& altAction = "", const std::string& alt = "") {
+    confirm_ = {true, action, g.tid, title, body, yes, altAction, alt};
+  }
+  // Download to this console: size, free space now and after, the time at mac1's measured speed, the data it uses when away
+  void AskDownload(const Game& g) {
+    const std::string hb = status_["homebrew_dir"].str();
+    const std::string drv = hb.rfind("/mnt/ext1", 0) == 0 ? "ext1" : hb.rfind("/mnt/ext0", 0) == 0 ? "ext0" : "data";
+    const char* drvName = drv == "ext1" ? "M.2" : drv == "ext0" ? "extended storage" : "console storage";
+    const long long freeMb = status_["free_mb"][drv.c_str()].ll(), keepMb = std::max(status_["min_free_mb"].ll(), 0LL);
+    const long long need = g.size, afterMb = freeMb - need / (1024 * 1024);
+    if (need <= 0) { Toast(g.title + ": its size is not known yet"); return; }
+    if (afterMb < keepMb) {
+      Toast("Not enough space on the " + std::string(drvName) + ": " + Gb(need) + " needed, " + FreeText(freeMb));
+      return;
+    }
+    long long bps = status_["dl_rate"].ll();
+    const bool measured = bps > 0 && wall_ - status_["dl_rate_at"].ll() < 3600;
+    if (!measured) bps = 850000;                         // 24 Oct 2026, PHAT5 away on a phone hotspot: ~0.85 MB/s
+    const long long s = need / std::max(bps, 1LL), h = s / 3600, m = s % 3600 / 60;
+    char t[96];
+    std::snprintf(t, sizeof t, "%s%lld h %02lld min", measured ? "About " : "Roughly ", h, m);
+    std::string body = Gb(need) + " onto the " + drvName + " (" + FreeText(freeMb) + " now, " + FreeText(afterMb) + " after). " + t + " at " +
+                       std::to_string(bps / 1000) + " KB/s. ";
+    if (status_["route"].str() == "TAILNET") body += "You are away: it uses " + Gb(need) + " of this connection's data. ";
+    body += "It keeps streaming meanwhile and switches to the console copy by itself once every piece is checked.";
+    if (wall_ - status_["dl_worker_at"].ll() > 120) body += " mac1's download helper is not answering right now: it starts when it is back.";
+    Ask_("download", g, "Download " + g.title + " to this console?", body, "Download", "remove", "Remove starter");
   }
   void PressConfirm(Button b) {
     if (b == kCross) { Act(confirm_.action, confirm_.tid); Toast(confirm_.yes + ": queued"); confirm_.active = false; }
+    if (b == kSquare && !confirm_.altAction.empty()) { Act(confirm_.altAction, confirm_.tid); Toast(confirm_.alt + ": queued"); confirm_.active = false; }
     if (b == kCircle) confirm_.active = false;
   }
   void PressActivity(Button b) {
@@ -877,19 +939,29 @@ class App {
       if (it->files > 1) f += "   +" + std::to_string(it->files - 1) + " more";
       Fact(b, px, y, pw, "On my drives", f, c::kGood);
     } else Fact(b, px, y, pw, "On my drives", it->streamable ? "streamed from the drives" : "not yet", it->streamable ? c::kGood : c::kTextDim);
-    Fact(b, px, y, pw, "Plays on", it->plays);
+    Fact(b, px, y, pw, "Plays on", g && g->onConsole ? "This PS5, from its own drive" : it->plays, g && g->onConsole ? c::kGood : c::kText);
     if (g) {
       Fact(b, px, y, pw, "Needs FW", g->fw.empty() ? "" : g->fw + "   (this console " + consoleFw_ + ")", g->state == "needs_fw" ? c::kAccent : c::kText);
-      std::string here = g->local == "starter" ? "Streaming starter" : g->local == "full" ? "Full copy" : g->local == "image" ? "Image file" : "Not installed";
-      if (!g->localPath.empty()) here += ": " + g->localPath;
+      std::string here = g->onConsole ? "ON THIS CONSOLE: plays without the network" : g->local == "starter" ? "Streams from mac1 (a small starter here)"
+                       : g->local == "full" ? "Full copy" : g->local == "image" ? "Image file" : "Not installed";
+      if (!g->copies.empty()) here += g->onConsole ? ". Copy: " + g->copies : ". Also here: " + g->copies;
+      else if (!g->localPath.empty()) here += ": " + g->localPath;
       if (g->pinned) here += "  (pinned)";
-      Fact(b, px, y, pw, "This console", here, g->local == "none" ? c::kTextDim : c::kGood);
+      Fact(b, px, y, pw, "This console", here, g->onConsole ? c::kGood : g->local == "none" ? c::kTextDim : c::kText);
+      if (!g->dlState.empty() || g->request == "download") {
+        std::string d = g->dlState.empty() ? "asked, mac1 starts it" : g->dlState;
+        if (g->dlTotal > 0) d += "   " + Gb(g->dlDone) + " of " + Gb(g->dlTotal);
+        if (g->dlState == "sending" && g->dlEta > 0) d += "   about " + std::to_string(g->dlEta / 3600) + " h " + std::to_string(g->dlEta % 3600 / 60) + " min left";
+        if (!g->dlMsg.empty()) d += "   " + g->dlMsg;
+        Fact(b, px, y, pw, "Download", d, g->dlState == "failed" ? c::kAccent : c::kText);
+      }
       Fact(b, px, y, pw, "Played", g->proof.empty() ? "no proof yet" : g->proof, g->proof.empty() ? c::kTextDim : c::kGood);
       if (!g->reason.empty()) Fact(b, px, y, pw, g->build == "done" ? "Last build" : "Why", g->reason, g->build == "done" ? c::kText : c::kAccent);
     }
     std::string hint;
     if (g) {
-      if (g->local == "starter" && g->state != "playing") hint = "{CROSS} Remove   ";
+      if (DlActive(g->dlState)) hint = "{CROSS} Stop download   ";
+      else if (g->local == "starter" && !g->onConsole && g->state != "playing") hint = "{CROSS} Download to console   ";
       else if (g->local == "none" && g->state != "needs_fw" && g->state != "building") hint = "{CROSS} Install   ";
       if (g->local == "starter" && g->onDrives && g->state != "playing") hint += "{TRIANGLE} Rebuild   ";
       hint += g->choice == "skip" ? "{SQUARE} Show" : "{SQUARE} Hide";
@@ -1209,11 +1281,11 @@ class App {
   // ---------------------------------------------------------------- overlays
   void DrawConfirm(Batch& b) {
     b.Rect(0, 0, 1920, 1080, Rgba{0, 0, 0, 170});
-    Round(b, 460, 360, 1460, 720, 16, c::kSurfaceHi);
-    Wrap(b, 508, 400, 904, confirm_.title, St(kHead, c::kTextHi), 2, 52);
-    Wrap(b, 508, 520, 904, confirm_.body, St(kBody, c::kText, -0.03f), 3, 44);
-    std::string h = "{CROSS} " + confirm_.yes + "      {CIRCLE} Cancel";
-    b.Text(508, 650, h.c_str(), St(kBody, c::kTextHi));
+    Round(b, 460, 300, 1460, 800, 16, c::kSurfaceHi);
+    Wrap(b, 508, 340, 904, confirm_.title, St(kHead, c::kTextHi), 2, 52);
+    Wrap(b, 508, 460, 904, confirm_.body, St(kBody, c::kText, -0.03f), 6, 40);
+    std::string h = "{CROSS} " + confirm_.yes + (confirm_.alt.empty() ? "" : "      {SQUARE} " + confirm_.alt) + "      {CIRCLE} Cancel";
+    b.Text(508, 730, h.c_str(), St(kBody, c::kTextHi));
   }
   void DrawToast(Batch& b) {
     if (toast_.empty() || now_ > toastUntil_) return;

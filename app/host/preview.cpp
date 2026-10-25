@@ -142,6 +142,11 @@ int main(int argc, char** argv) {
                                       bad += Shot(font, r, out + "/18-discover-wish-toast"); }
   if (on("19-discover-notable-system")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); for (int i = 0; i < 3; ++i) r.Press(kR2);
                                           for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Wait(1); bad += Shot(font, r, out + "/19-discover-notable-system"); }
+  // 0.5.0 DOWNLOAD TO CONSOLE (docs/DOWNLOAD-TO-CONSOLE.md 6): what is on the console vs streamed, the Download dialog, progress
+  if (on("21-on-console")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch); r.Wait(1); bad += Shot(font, r, out + "/21-on-console"); }
+  if (on("22-streams")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Press(kTouch); r.Wait(1); bad += Shot(font, r, out + "/22-streams"); }
+  if (on("23-download-confirm")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kDown); r.Press(kCross);
+                                   bad += Shot(font, r, out + "/23-download-confirm"); }
   if (on("20-discover-wishlist")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); r.Press(kL2); r.Wait(1); bad += Shot(font, r, out + "/20-discover-wishlist"); }
   std::printf(bad ? "%d FAIL\n" : "ALL SHOTS OK\n", bad);
   return bad ? 1 : 0;
