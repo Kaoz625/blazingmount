@@ -7,6 +7,7 @@
     download-to-console.py switch  CONSOLE TID                 only the switch (everything sent and verified)
     download-to-console.py cancel  CONSOLE TID                 stop wanting it; deletes ONLY its staged files in incoming/
     download-to-console.py put     CONSOLE FILE... --to DIR    any files (ROMs, ...) the same way: pieces checked, then renamed into DIR
+    download-to-console.py serve   CONSOLE...                  the worker the app talks to: its requests -> runs, progress -> the console
     download-to-console.py status                              the journal, human-readable
 
 The contract is docs/DOWNLOAD-TO-CONSOLE.md. Markus, 24 Oct 2026, PHAT5 away on a phone hotspot: "is there a way to download
@@ -156,7 +157,9 @@ def own_job(st, key, tid, console):
 def save_state(st):
     """Writes only the jobs this run works on."""
     os.makedirs(os.path.join(HOME, "jobs"), exist_ok=True)
+    now = int(time.time())
     for key in st["own"]:
+        st["jobs"][key]["at"] = now
         p = job_file(key)
         with open(p + ".tmp", "w", encoding="utf-8") as fh:
             json.dump(st["jobs"][key], fh, indent=1, sort_keys=True)
@@ -288,6 +291,11 @@ def ftp_mkdirs(f, path):
             pass
 
 
+def ftp_delete(f, path):
+    """DELE that takes any 2xx: ftpsrv answers 226, which ftplib's delete() raises on."""
+    return f.sendcmd("DELE " + path)
+
+
 def ftp_rename(f, a, b):
     f.sendcmd("RNFR " + a)
     f.sendcmd("RNTO " + b)
@@ -408,6 +416,13 @@ class Stop(Exception):
     pass
 
 
+def stop_check(args, job):
+    """STOP (every run) or jobs/<console>-<TID>.stop (this title: the app's Cancel, through `serve`)."""
+    for p in (args.cancel_file, job_file("%s:%s" % (job["console"], job["tid"]))[:-5] + ".stop"):
+        if p and os.path.exists(p):
+            raise Stop("stop file " + p)
+
+
 def streaming_now():
     """True when imgserve served a request in the last YIELD_S seconds (a streamed game is playing)."""
     try:
@@ -478,8 +493,7 @@ def send_file(con, st, job, f, rate, base_done, total, args):
     npieces = (f["size"] + PIECE - 1) // PIECE
     fails = 0
     while True:
-        if args.cancel_file and os.path.exists(args.cancel_file):
-            raise Stop("cancel file " + args.cancel_file)
+        stop_check(args, job)
         if not args.no_yield and streaming_now():
             job["state"], job["msg"] = "waiting", "a streamed game is playing (imgserve busy): paused"
             save_state(st)
@@ -524,7 +538,7 @@ def send_file(con, st, job, f, rate, base_done, total, args):
                         left -= len(b)
                 fh.seek(start)
                 if start == 0 and have:
-                    c.delete(f["dest"])
+                    ftp_delete(c, f["dest"])
                 job["state"], job["msg"] = "sending", ""
                 save_state(st)
                 log("%s: %s from %s of %s (%d/%d pieces checked)" % (job["tid"], f["rel"], gb(start), gb(f["size"]),
@@ -569,8 +583,7 @@ def send_file(con, st, job, f, rate, base_done, total, args):
                             save_state(st)
                             log("%s: %s / %s (%.1f%%)  %.2f MB/s  ~%s left" % (job["tid"], gb(done), gb(total), 100.0 * done / total,
                                                                          bps / 1e6, dur(job["eta"]) if bps else "?"))
-                            if args.cancel_file and os.path.exists(args.cancel_file):
-                                raise Stop("cancel file " + args.cancel_file)
+                            stop_check(args, job)
                             if not args.no_yield and streaming_now():
                                 raise IOError("yield to a streamed game")
                 finally:
@@ -825,13 +838,15 @@ def cmd_get(args):
             save_state(st)
             log("%s: %s" % (tid, job["msg"]))
             continue
-        eta = plan["total"] / (float(args.rate) * 1e6)
+        mbps = (job.get("rate") or 0) / 1e6 or float(args.rate)          # this title's last measured speed, else --rate
+        fresh = not any(f.get("pieces") for f in job["files"].values())
+        eta = (plan["total"] - staged) / (mbps * 1e6)
         log("%s %s: %s to %s:%s (%d file%s), free %d MB; at ~%.2f MB/s about %s" % (
             tid, plan["title"], gb(plan["total"]), con.name, plan["drive"], len(plan["files"]), "s" * (len(plan["files"]) > 1),
-            free, float(args.rate), dur(eta)))
+            free, mbps, dur(eta)))
         hub("%s %s (%s): %s -> %s:%s, ETA ~%s at %.2f MB/s; resumable, every 1 GiB piece hashed" % (
-            "START" if not job["files"] else "RESUME", plan["title"], tid, gb(plan["total"]), con.name, plan["drive"], dur(eta), float(args.rate)))
-        if args.notice:
+            "START" if fresh else "RESUME", plan["title"], tid, gb(plan["total"]), con.name, plan["drive"], dur(eta), mbps))
+        if args.notice and fresh:                            # once per title, not at every resume
             notice(con, "Downloading %s to your console: %s, about %s on this connection." % (plan["title"], gb(plan["total"]), dur(eta)))
         rate, base = Rate(), 0
         for f in plan["files"]:
@@ -864,7 +879,7 @@ def console_copy(con, st, job, plan, src, args):
     cur = ftp_size(c, f["dest"])
     if cur != f["size"]:
         if cur is not None:
-            c.delete(f["dest"])
+            ftp_delete(c, f["dest"])
         fj.update(pieces=[], verified=[], bad={})
         c.sendcmd("SITE CPFR " + src)
         log("%s: %s" % (plan["tid"], c.sendcmd("SITE CPTO " + f["dest"])))
@@ -1054,11 +1069,127 @@ def cmd_cancel(args):
         c = con.ftp()
         for f in plan["files"]:
             if "/blz-stage/incoming/" in f["dest"] and ftp_size(c, f["dest"]) is not None:
-                c.delete(f["dest"])
+                ftp_delete(c, f["dest"])
                 log("%s: deleted %s" % (tid, f["dest"]))
         c.quit()
         job.update(state="cancelled", files={}, msg="cancelled")
         save_state(st)
+
+
+# ---------------------------------------------------------------- the worker the app talks to (through the payload)
+
+ACTIVE = ("queued", "waiting", "sending", "verifying", "switching", "removing")
+DL_STATUS = "/data/blazing/dl-status.tsv"
+WORKER_VERSION = "1"
+
+
+def status_tsv(con, route):
+    """dl-status.tsv for one console from the job files (docs/DOWNLOAD-TO-CONSOLE.md 3): worker, rate, one job line per title."""
+    now = int(time.time())
+    rate, jobs = 0, []
+    for k, j in sorted(load_state()["jobs"].items()):
+        if j.get("console") != con.name or not re.match(r"^(PPSA|CUSA)\d{5}$", j.get("tid", "")):
+            continue
+        state = j.get("state") or "queued"
+        if state in ACTIVE and now - int(j.get("at") or 0) < 180:
+            rate += int(j.get("rate") or 0)
+        msg = re.sub(r"[\t\r\n]+", " ", j.get("msg") or "")[:200]
+        jobs.append("job\t%s\t%s\t%d\t%d\t%d\t%d\t%s" % (j["tid"], state, int(j.get("done") or 0), int(j.get("total") or 0),
+                                                         int(j.get("eta") or 0), int(j.get("at") or j.get("created") or 0), msg))
+    return "".join(l + "\n" for l in ["# written by mac1 (blazingmount host/download-to-console.py serve); read by blazingmountd 2.8",
+                                         "worker\t%d\t%s" % (now, WORKER_VERSION), "rate\t%d\t%d\t%s" % (rate, now, route)] + jobs)
+
+
+def put_status(con, text):
+    """STOR .tmp, then rename over the old file (ftpsrv never overwrites: the old one is deleted first)."""
+    import io
+    c = con.ftp()
+    try:
+        tmp = DL_STATUS + ".tmp"
+        if ftp_size(c, tmp) is not None:
+            ftp_delete(c, tmp)
+        c.storbinary("STOR " + tmp, io.BytesIO(text.encode("utf-8")))
+        if ftp_size(c, DL_STATUS) is not None:
+            ftp_delete(c, DL_STATUS)
+        ftp_rename(c, tmp, DL_STATUS)
+    finally:
+        try:
+            c.quit()
+        except NET_ERRORS:
+            pass
+
+
+def cmd_serve(args):
+    """Answers the app: every --every-poll seconds GET /api/downloads of each console; a new `download` request starts a `get`
+    run (at most --max at once per console), `cancel` stops that title's run and deletes its staged files, `remove_local` is
+    reported as not built yet. dl-status.tsv goes back to the console each round, so the app shows the progress."""
+    cons = [Console(t) for t in [args.console] + list(args.tid)]
+    seenp = os.path.join(HOME, "serve-seen.json")
+    try:
+        seen = json.load(open(seenp))
+    except (OSError, ValueError):
+        seen = {}
+    procs, cancelled = {}, set()
+    log("serve: watching %s (poll %ds, at most %d runs per console)" % (", ".join(c.name for c in cons), args.poll, args.max))
+    while True:
+        for con in cons:
+            try:
+                d = json.loads(http(con.api + "/api/downloads", timeout=20))
+            except (urllib.error.URLError, OSError, ValueError):
+                d = None
+            for r in (d or {}).get("requests", []):
+                key, at = jkey(con, r.get("tid", "")), int(r.get("at") or 0)
+                if not re.match(r"^(PPSA|CUSA)\d{5}$", r.get("tid", "")) or at <= int(seen.get(key, 0)):
+                    continue
+                seen[key] = at
+                with open(seenp + ".tmp", "w") as fh:
+                    json.dump(seen, fh)
+                os.replace(seenp + ".tmp", seenp)
+                stopf = job_file(key)[:-5] + ".stop"
+                if r["what"] == "download":
+                    if key in procs and procs[key].poll() is None:
+                        log("serve: %s asked again: already running" % key)
+                        continue
+                    if sum(1 for k, p in procs.items() if k.startswith(con.name + ":") and p.poll() is None) >= args.max:
+                        log("serve: %s waits: %d runs already on %s" % (key, args.max, con.name))
+                        seen[key] = at - 1                    # look at it again next round
+                        continue
+                    if os.path.exists(stopf):
+                        os.remove(stopf)
+                    os.makedirs(os.path.join(HOME, "runs"), exist_ok=True)
+                    cmd = [sys.executable, "-I", os.path.abspath(__file__), "get", con.name if con.name != con.ip else con.ip,
+                           r["tid"], "--notice", "--hub", HUB, "--every", str(args.every)]
+                    procs[key] = subprocess.Popen(cmd, stdout=open(os.path.join(HOME, "runs", key.replace(":", "-") + ".log"), "a"),
+                                                  stderr=subprocess.STDOUT)
+                    log("serve: %s: download asked by the app -> run pid %d" % (key, procs[key].pid))
+                elif r["what"] == "cancel":
+                    open(stopf, "w").write("cancelled by the app %d\n" % at)
+                    cancelled.add(key)
+                    log("serve: %s: cancel asked by the app" % key)
+                elif r["what"] == "remove_local":
+                    log("serve: %s: remove-local asked: not built yet (DOWNLOAD-TO-CONSOLE.md 5.5)" % key)
+            for key in [k for k in cancelled if k.startswith(con.name + ":")]:
+                if key in procs and procs[key].poll() is None:
+                    continue                                  # it stops at its next progress check
+                subprocess.run([sys.executable, "-I", os.path.abspath(__file__), "cancel", con.name if con.name != con.ip else con.ip,
+                                key.split(":", 1)[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
+                cancelled.discard(key)
+                log("serve: %s: cancelled, staged files deleted" % key)
+            try:
+                put_status(con, status_tsv(con, ((con.status() or {}).get("route") or "?")))
+            except NET_ERRORS as e:
+                log("serve: %s: dl-status not written (%s)" % (con.name, e))
+        if args.once:
+            if all(p.poll() is not None for p in procs.values()) and not cancelled:
+                for con in cons:                              # the last word: every run's final state
+                    try:
+                        put_status(con, status_tsv(con, ((con.status() or {}).get("route") or "?")))
+                    except NET_ERRORS:
+                        pass
+                return
+            time.sleep(1)
+            continue
+        time.sleep(args.poll)
 
 
 def cmd_status(args):
@@ -1073,7 +1204,7 @@ def cmd_status(args):
 def main():
     global HUB
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=("plan", "get", "put", "verify", "switch", "cancel", "status"))
+    ap.add_argument("cmd", choices=("plan", "get", "put", "verify", "switch", "cancel", "serve", "status"))
     ap.add_argument("console", nargs="?")
     ap.add_argument("tid", nargs="*")
     ap.add_argument("--rate", default="0.85", help="MB/s used for time estimates (measured 24 Oct away: 0.86)")
@@ -1084,14 +1215,19 @@ def main():
     ap.add_argument("--hub", default=HUB, help="team chat file for milestone lines")
     ap.add_argument("--to", help="put: the console folder the files end up in (same drive as the staging)")
     ap.add_argument("--label", help="put: the job's name (default: the last part of --to)")
+    ap.add_argument("--poll", type=int, default=20, help="serve: seconds between rounds")
+    ap.add_argument("--max", type=int, default=3, help="serve: runs at once per console (one stream each)")
+    ap.add_argument("--once", action="store_true", help="serve: one round, wait for the runs it started, write the status, exit")
     ap.add_argument("--every", type=float, default=30.0, help="progress line every N seconds")
     ap.add_argument("--cancel-file", default=os.path.join(HOME, "STOP"), help="stop cleanly when this file exists")
     args = ap.parse_args()
     HUB = args.hub
-    if args.cmd != "status" and (not args.console or not args.tid):
+    if args.cmd not in ("status", "serve") and (not args.console or not args.tid):
         ap.error("CONSOLE and at least one TID please")
+    if args.cmd == "serve" and not args.console:
+        ap.error("serve CONSOLE [CONSOLE...]")
     return {"plan": cmd_plan, "get": cmd_get, "put": cmd_put, "verify": cmd_verify, "switch": cmd_switch, "cancel": cmd_cancel,
-            "status": cmd_status}[args.cmd](args)
+            "serve": cmd_serve, "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":

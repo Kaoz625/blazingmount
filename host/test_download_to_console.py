@@ -32,7 +32,7 @@ import urllib.parse
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "download-to-console.py")
 PIECE = 64 * 1024
-CFG = {"stor_rests": [], "sha_route": True, "drop_after": 0, "corrupt_at": -1, "free": 10 * 1024 ** 3, "running": "", "actions": []}
+CFG = {"requests": [], "stor_rests": [], "sha_route": True, "drop_after": 0, "corrupt_at": -1, "free": 10 * 1024 ** 3, "running": "", "actions": []}
 
 
 def rnd(n, seed):
@@ -205,6 +205,8 @@ class Web(http.server.BaseHTTPRequestHandler):
                     b = fh.read(ln)
                 return self.send(200, {"path": q["path"], "off": off, "len": len(b), "size": os.path.getsize(fp),
                                        "sha256": hashlib.sha256(b).hexdigest()})
+            if path == "/api/downloads":
+                return self.send(200, {"version": "2.8-test", "requests": CFG["requests"], "jobs": []})
             return self.send(404, {"error": "not found"})
         if port == PORTS["img"]:
             if path == "/games.json":
@@ -410,6 +412,24 @@ def main():
         check(code == 0 and ok and job("put-gamecube").get("state") == "done", "put: ROMs checked and placed in --to" + ("" if ok else ": " + out[-700:]))
         code, out = run("put", con, roms[0], "--to", "/data/homebrew/PPSA99171/content/gamecube")
         check(code != 0 and "never /data" in out, "put: /data refused on a console with an M.2")
+        # 5c) serve: the app's request (through the payload) -> a run -> switched; progress written back as dl-status.tsv
+        n6 = "Zeta (PPSA70006).ffpfsc"
+        open(os.path.join(src, n6), "wb").write(rnd(2 * PIECE + 3, "zeta"))
+        GAMES.append({"tid": "PPSA70006", "title": "Zeta", "fw": "5.00", "size": 2 * PIECE + 3, "key": "PPSA70006@%d" % (2 * PIECE + 3), "name": n6})
+        os.makedirs(os.path.join(hb, "Zeta (PPSA70006)"))
+        open(os.path.join(link, "PPSA70006.cfg"), "w").write("mode remote\nserver 1.2.3.4 4451\nbase /t/PPSA70006@%d\n" % (2 * PIECE + 3))
+        CFG["requests"] = [{"what": "download", "tid": "PPSA70006", "at": 1000}, {"what": "cancel", "tid": "PPSA70007", "at": 1001}]
+        code, out = run("serve", con, "--once", "--poll", "1", timeout=200)
+        st6 = os.path.join(ROOT, "data", "blazing", "dl-status.tsv")
+        lines = open(st6).read().splitlines() if os.path.exists(st6) else []
+        check(code == 0 and same("/mnt/ext1/homebrew/" + n6, os.path.join(src, n6)), "serve: the app's download request ran and switched" + ("" if code == 0 else ": " + out[-700:]))
+        check(any(l.startswith("job\tPPSA70006\tdone\t%d\t%d\t" % (2 * PIECE + 3, 2 * PIECE + 3)) for l in lines) and
+              any(l.startswith("worker\t") for l in lines) and any(l.startswith("rate\t") for l in lines),
+              "serve: dl-status.tsv on the console (worker, rate, the job done)" + ("" if lines else ": no file"))
+        check(not any("put-" in l for l in lines), "serve: put jobs are not written as titles")
+        check(os.path.exists(os.path.join(home, "jobs", "127.0.0.1-PPSA70007.stop")), "serve: the app's cancel leaves the title's stop file")
+        code, out = run("serve", con, "--once", "--poll", "1", timeout=60)
+        check("download asked" not in out and code == 0, "serve: a request already handled is not run twice")
         # 6) refusals
         GAMES.append({"tid": "PPSA70005", "title": "Eps", "fw": "5.00", "size": 3 * PIECE, "key": "PPSA70005@%d" % (3 * PIECE), "name": "Eps (PPSA70005).ffpfsc"})
         open(os.path.join(src, "Eps (PPSA70005).ffpfsc"), "wb").write(rnd(3 * PIECE, "eps"))
