@@ -27,6 +27,8 @@
 //   GET  /api/sha256?path=&off=&len= v2.8: SHA-256 of up to 1 GiB of a file under <drive>/blz-stage/incoming/ (mac1 verifies a download)
 //   GET  /api/pull, POST /api/pull?src=&port=&dest=&size=&conns= | ?cancel=1   v2.9 (bm_pull.c): the console pulls a host file into
 //                                    incoming/ on several Range connections, resumable; mac1 verifies with /api/sha256 as before
+//   GET  /api/pm/drives|packages|queue|status, POST /api/pm/install?path=|cancel?id=|refresh   v2.9: install a PKG from the drives
+//                                    with no copy first, through PKG Manager on this console (:8844)
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
 //        | download | remove_local | cancel_dl (v2.8: one line per title in /data/blazing/downloads.tsv for mac1's worker)
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
@@ -927,6 +929,66 @@ static int api_sha256(sb_t *o, const char *query) {                 // the HTTP 
 
 #include "bm_pull.c"               // v2.9: the console pulls a file from the host itself (POST/GET /api/pull)
 
+// ---------------------------------------------------------------- v2.9: install a PKG straight from the drives (1x storage)
+// Markus 26 Oct 2026: PlayBridge's "the console installs directly from your PC, no double storage". PKG Manager (our fork,
+// pkgmgr-blazing, GPL-3.0) already does exactly that on both consoles: it hands Sony's installer a 127.0.0.1 stream URL and feeds
+// it Range reads from an SMB share (mac1-8TB is one of its sources since 26 Oct), with live status, cancel, and split PKGs. So
+// BlazingMount does not install anything itself: the app asks this API and it passes the call to PKG Manager on this console.
+//   GET  /api/pm/drives | /api/pm/packages?drive=<id> | /api/pm/queue | /api/pm/status     -> PKG Manager's own answer
+//   POST /api/pm/install?path=<smb://...pkg>  | /api/pm/cancel?id=<job>  | /api/pm/refresh   (header X-BM-Request: 1)
+#ifndef BM_PM_PORT
+#define BM_PM_PORT 8844
+#endif
+static int pm_http(const char *method, const char *path, const char *body, sb_t *out) {   // PKG Manager's HTTP status, or -1
+    int s = connect_ms("127.0.0.1", BM_PM_PORT, 2000);
+    if (s < 0) return -1;
+    struct timeval tv = { 20, 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    char h[1400]; size_t bl = body ? strlen(body) : 0;
+    int hl = snprintf(h, sizeof h, "%s %s HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                      method, path, bl);
+    if (hl >= (int)sizeof h || write_all(s, h, (size_t)hl) != 0 || (bl && write_all(s, body, bl) != 0)) { close(s); return -1; }
+    sb_t r = { 0 }; char buf[16384]; ssize_t n;
+    while ((n = read(s, buf, sizeof buf)) > 0) sb_put(&r, buf, (size_t)n);
+    close(s);
+    char *e = r.b ? strstr(r.b, "\r\n\r\n") : NULL;
+    int st = (r.n > 12 && !strncmp(r.b, "HTTP/1.", 7)) ? atoi(r.b + 9) : -1;
+    if (e && st > 0) sb_put(out, e + 4, r.n - (size_t)(e + 4 - r.b));
+    free(r.b);
+    return e ? st : -1;
+}
+
+static void reply_json(int s, int code, sb_t *b);
+static void api_pm(int s, const char *method, const char *target, const char *query, const char *req) {
+    sb_t b = { 0 }; int st = -1;
+    const char *what = target + 8;                                   // after "/api/pm/"
+    char v[700], body[1600], path[300];
+    if (!strcmp(method, "GET") && (!strcmp(what, "drives") || !strcmp(what, "queue") || !strcmp(what, "status") || !strcmp(what, "packages"))) {
+        if (!strcmp(what, "packages") && get_q(query, "drive", v, sizeof v)) {
+            char enc[400]; url_path(enc, sizeof enc, v); snprintf(path, sizeof path, "/api/packages?drive=%s", enc);
+        } else snprintf(path, sizeof path, "/api/%s", what);
+        st = pm_http("GET", path, NULL, &b);
+    } else if (!strcmp(method, "POST") && (!strcmp(what, "install") || !strcmp(what, "cancel") || !strcmp(what, "refresh"))) {
+        if (!strcasestr(req, "\nX-BM-Request: 1")) { sb_puts(&b, "{\"ok\":false,\"error\":\"missing X-BM-Request header\"}"); reply_json(s, 403, &b); free(b.b); return; }
+        if (!strcmp(what, "install")) {
+            if (!get_q(query, "path", v, sizeof v) || strncmp(v, "smb://", 6) || !ends_with(v, ".pkg", 1)) {
+                sb_puts(&b, "{\"ok\":false,\"error\":\"path must be an smb://.../<file>.pkg from /api/pm/packages\"}"); reply_json(s, 400, &b); free(b.b); return;
+            }
+            sb_t j = { 0 }; sb_puts(&j, "{\"path\":"); sb_js(&j, v); sb_puts(&j, "}");
+            snprintf(body, sizeof body, "%s", j.b ? j.b : "{}"); free(j.b);
+            st = pm_http("POST", "/api/install", body, &b);
+            logf_("ui: install from the drives (PKG Manager) %s -> HTTP %d", v, st);
+        } else if (!strcmp(what, "cancel")) {
+            snprintf(body, sizeof body, "{\"id\":%llu}", get_q(query, "id", v, sizeof v) ? strtoull(v, NULL, 10) : 0ULL);
+            st = pm_http("POST", "/api/queue/cancel", body, &b);
+            logf_("ui: cancel install job %s (PKG Manager) -> HTTP %d", v, st);
+        } else st = pm_http("POST", "/api/packages/refresh", "{}", &b);
+    } else { sb_puts(&b, "{\"error\":\"not found\"}"); reply_json(s, 404, &b); free(b.b); return; }
+    if (st < 0) { free(b.b); b.b = NULL; b.n = 0; sb_puts(&b, "{\"ok\":false,\"error\":\"PKG Manager is not running on this console (:8844)\"}"); reply_json(s, 502, &b); }
+    else reply_json(s, st, &b);
+    free(b.b);
+}
+
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
 static const struct { const char *k, *type, *help; } k_keys[] = {
     { "host", "s", "The computer with your game drives (imgserve)" },
@@ -1245,6 +1307,7 @@ static void api_handle(int s) {
             else { sb_f(&b, "{\"ok\":true,\"queued\":"); sb_js(&b, what); sb_put(&b, "}", 1); reply_json(s, 200, &b); }
         }
     }
+    else if (!strncmp(target, "/api/pm/", 8)) api_pm(s, method, target, query, req);
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/pull")) { api_pull_status(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "POST") && !strcmp(target, "/api/pull")) {
         char v[8];
