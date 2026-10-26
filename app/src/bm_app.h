@@ -12,6 +12,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -65,7 +66,7 @@ struct Setting {
   std::string key, type, value, help, edit;   // edit: the value being changed with Left/Right (empty = none)
 };
 
-enum class Tab { kLibrary, kDiscover, kActivity, kSettings };
+enum class Tab { kLibrary, kDiscover, kInstall, kActivity, kSettings };   // kInstall (0.6, 26 Oct): PKGs from the drives, 1x storage
 enum class Filter { kAll, kOnConsole, kNotInstalled, kProblems, kHidden, kPs5, kPs4, kCount };   // (kept for the preview's old shots)
 
 // The whole library (Markus 24 Oct: everything he owns, every system): L2/R2 walk the systems, OPTIONS what to show, TOUCH PAD grid/list
@@ -312,6 +313,42 @@ class App {
     } else if (path.rfind("/api/icon/", 0) == 0) {
       const std::string tid = path.substr(10);
       if (code == 200 && !body.empty()) covers_.Put(tid, body); else covers_.Failed(tid);
+    } else if (Base(path) == "/api/pm/drives") {
+      pmTried_ = true;
+      pmDown_ = code == 502 || code == 0;
+      if (!ok) return;
+      pmDrives_.clear();
+      for (const auto& d : v.items) if (d["clickable"].truthy() && d["pkg_count"].ll() > 0) pmDrives_.push_back({d["id"].str(), d["label"].str(), d["pkg_count"].ll()});
+      if (pmDrive_ >= int(pmDrives_.size())) pmDrive_ = 0;
+      for (size_t i = 0; i < pmDrives_.size(); ++i) if (pmDrives_[i].id == "mac1_8tb" && !pmPicked_) pmDrive_ = int(i);   // the 8TB first
+    } else if (Base(path) == "/api/pm/packages") {
+      if (!ok) return;
+      std::string keep = pmSel_ < int(pm_.size()) ? pm_[size_t(pmSel_)].path : "";
+      pm_.clear();
+      for (const auto& j : v.items) {
+        PmPkg k;
+        k.path = j["path"].str(); k.title = j["title_name"].str(); k.tid = j["title_id"].str(); k.version = j["app_version"].str();
+        k.type = j["pkg_type"].str(); k.size = j["total_pkg_size"].ll(); k.parts = (int)j["total_parts"].ll();
+        k.installed = j["is_installed"].truthy() || j["is_dlc_installed"].truthy(); k.installedVersion = j["installed_version"].str();
+        k.canInstall = j["can_install"].truthy(); k.why = j["install_disabled_reason"].str();
+        if (k.title.empty()) k.title = j["filename"].str();
+        pm_.push_back(std::move(k));
+      }
+      pmSel_ = 0;
+      for (size_t i = 0; i < pm_.size(); ++i) if (pm_[i].path == keep) pmSel_ = int(i);
+      pmFor_ = QueryArg(path, "drive");
+    } else if (Base(path) == "/api/pm/status") {
+      if (ok) pmStatus_ = std::move(v);
+    } else if (Base(path) == "/api/pm/queue") {
+      if (ok) pmQueue_ = std::move(v);
+    } else if (Base(path) == "/api/pm/install" || Base(path) == "/api/pm/cancel" || Base(path) == "/api/pm/refresh") {
+      const std::string what = Base(path).substr(8);
+      if (code == 0) Toast("BlazingMount did not answer");
+      else if (!ok || (v["success"].ok() && !v["success"].truthy()) || code >= 300)
+        Toast((what == "install" ? "Not installed: " : what == "cancel" ? "Not cancelled: " : "Not rescanned: ") +
+              (v["error"].str().empty() ? v["message"].str() : v["error"].str()));
+      else Toast(what == "install" ? "Installing: it reads straight from your drives (no copy first)" : what == "cancel" ? "Install cancelled" : "Looking at your drives again");
+      nextPm_ = 0; nextPmList_ = what == "refresh" ? now_ + 8.0 : 0;
     } else if (Base(path) == "/api/action") {
       if (!ok) Toast(code == 0 ? "BlazingMount did not answer" : "Refused: " + v["error"].str());
       nextStatus_ = 0;   // see the result soon
@@ -322,7 +359,7 @@ class App {
   void Press(Button b) {
     if (confirm_.active) { PressConfirm(b); return; }
     if (b == kL1 || b == kR1) {
-      int t = (int(tab_) + (b == kR1 ? 1 : 3)) % 4;
+      int t = (int(tab_) + (b == kR1 ? 1 : 4)) % 5;
       tab_ = Tab(t);
       if (tab_ == Tab::kSettings) settingsGen_ = 0;
       return;
@@ -330,6 +367,7 @@ class App {
     switch (tab_) {
       case Tab::kLibrary: if (b == kTouch) { grid_ = !grid_; top_ = 0; return; } PressLibrary(b); break;
       case Tab::kDiscover: PressDiscover(b); break;
+      case Tab::kInstall: PressInstall(b); break;
       case Tab::kActivity: PressActivity(b); break;
       case Tab::kSettings: PressSettings(b); break;
     }
@@ -358,6 +396,14 @@ class App {
       Ask("GET", "/api/wishlist"); nextWish_ = now + 60.0;
     }
     if (connected_ && tab_ == Tab::kDiscover) RequestCoversOf(now, dItems_, dView_, dSel_, dTop_, true, "dsheet");
+    // INSTALL: PKG Manager's drives + packages (slow), its status + queue every second while the tab is open or a job runs
+    if (connected_ && (tab_ == Tab::kInstall || PmBusy())) {
+      if (now >= nextPmList_ && !Inflight("/api/pm/drives")) { Ask("GET", "/api/pm/drives"); nextPmList_ = now + 15.0; nextPkgs_ = 0; }
+      if (!pmDrives_.empty() && (pmFor_ != pmDrives_[size_t(pmDrive_)].id || now >= nextPkgs_) && !Inflight("/api/pm/packages") && tab_ == Tab::kInstall) {
+        Ask("GET", "/api/pm/packages?drive=" + pmDrives_[size_t(pmDrive_)].id); nextPkgs_ = now + 20.0;
+      }
+      if (now >= nextPm_ && !Inflight("/api/pm/status") && !Inflight("/api/pm/queue")) { Ask("GET", "/api/pm/status"); Ask("GET", "/api/pm/queue"); nextPm_ = now + 1.0; }
+    }
     if (connected_ && tab_ == Tab::kActivity && now >= nextLog_ && !Inflight("/api/log")) { Ask("GET", "/api/log?lines=80"); nextLog_ = now + 2.0; }
   }
   std::vector<Request> TakeRequests() { std::vector<Request> r; r.swap(out_); return r; }
@@ -371,6 +417,7 @@ class App {
     switch (tab_) {
       case Tab::kLibrary: DrawLibrary(b); break;
       case Tab::kDiscover: DrawDiscover(b); break;
+      case Tab::kInstall: DrawInstall(b); break;
       case Tab::kActivity: DrawActivity(b); break;
       case Tab::kSettings: DrawSettings(b); break;
     }
@@ -413,6 +460,17 @@ class App {
   std::vector<std::string> inflight_;
   Tab tab_ = Tab::kLibrary;
   int sel_ = 0, top_ = 0, setSel_ = 0, logScroll_ = 0;
+  // ---- INSTALL (0.6): PKGs on the drives, installed with no copy first by PKG Manager on this console (payload /api/pm/*)
+  struct PmDrive { std::string id, label; long long count; };
+  struct PmPkg { std::string path, title, tid, version, type, installedVersion, why; long long size = 0; int parts = 0; bool installed = false, canInstall = true; };
+  std::vector<PmDrive> pmDrives_;
+  std::vector<PmPkg> pm_;
+  json::Value pmStatus_, pmQueue_;
+  std::string pmFor_;
+  int pmDrive_ = 0, pmSel_ = 0, pmTop_ = 0;
+  bool pmTried_ = false, pmDown_ = false, pmPicked_ = false;
+  double nextPm_ = 0, nextPmList_ = 0, nextPkgs_ = 0, pmRateAt_ = 0, pmRate_ = 0;
+  long long pmRateDone_ = 0;
   unsigned long gen_ = 0, libGen_ = ~0ul, settingsGen_ = 0;
   bool connected_ = false, haveLibrary_ = false, hostOk_ = true, auto_ = true, seenStatus_ = false;
   int misses_ = 0;
@@ -659,10 +717,112 @@ class App {
     Ask_("download", g, "Download " + g.title + " to this console?", body, "Download", "remove", "Remove starter");
   }
   void PressConfirm(Button b) {
+    if (b == kCross && confirm_.action == "pm_install") { Ask("POST", "/api/pm/install?path=" + PathEnc(confirm_.tid)); confirm_.active = false; return; }
     if (b == kCross) { Act(confirm_.action, confirm_.tid); Toast(confirm_.yes + ": queued"); confirm_.active = false; }
     if (b == kSquare && !confirm_.altAction.empty()) { Act(confirm_.altAction, confirm_.tid); Toast(confirm_.alt + ": queued"); confirm_.active = false; }
     if (b == kCircle) confirm_.active = false;
   }
+  bool PmBusy() const { return pmStatus_["is_installing"].truthy() || pmQueue_["active_id"].ll() > 0; }
+  static std::string PathEnc(const std::string& s) {           // a query value: everything but unreserved characters %-encoded
+    static const char* hx = "0123456789ABCDEF"; std::string o;
+    for (unsigned char ch : s) {
+      if (std::isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~' || ch == '/') o += char(ch);
+      else { o += '%'; o += hx[ch >> 4]; o += hx[ch & 15]; }
+    }
+    return o;
+  }
+  void PressInstall(Button b) {
+    const int n = int(pm_.size());
+    if (b == kUp && n) pmSel_ = (pmSel_ + n - 1) % n;
+    if (b == kDown && n) pmSel_ = (pmSel_ + 1) % n;
+    if ((b == kLeft || b == kRight || b == kL2 || b == kR2) && pmDrives_.size() > 1) {
+      const int k = int(pmDrives_.size());
+      pmDrive_ = (pmDrive_ + ((b == kRight || b == kR2) ? 1 : k - 1)) % k; pmPicked_ = true; pmSel_ = 0; pm_.clear();
+    }
+    if (b == kTriangle) Ask("POST", "/api/pm/refresh");
+    if (b == kSquare && PmBusy()) Ask("POST", "/api/pm/cancel?id=" + std::to_string(pmQueue_["active_id"].ll()));
+    if (b == kCross && pmSel_ < n) {
+      const PmPkg& k = pm_[size_t(pmSel_)];
+      if (!k.canInstall) { Toast("Can't install: " + (k.why.empty() ? std::string("PKG Manager says no") : k.why)); return; }
+      if (PmBusy()) { Toast("One install at a time: wait for this one, or {SQUARE} to cancel it"); return; }
+      const json::Value& fm = status_["free_mb"];
+      std::string body = (k.type.empty() ? std::string("Game") : k.type == "base" ? std::string("Game") : k.type == "update" ? std::string("Update") : k.type == "dlc" ? std::string("Add-on") : k.type) +
+                         " " + k.version + ", " + Gb(k.size) + (k.parts > 1 ? " in " + std::to_string(k.parts) + " parts" : "") +
+                         ". It installs straight from your drives: nothing is copied to the console first, so it needs " + Gb(k.size) +
+                         " on the console, not twice that. Free now: " + FreeText(fm["ext1"].ll(-1) > 0 ? fm["ext1"].ll() : fm["data"].ll(-1)) + ".";
+      if (k.installed) body += " It is already installed" + (k.installedVersion.empty() ? std::string("") : " (" + k.installedVersion + ")") + ".";
+      confirm_ = {true, "pm_install", k.path, "Install " + k.title + "?", body, "Install", "", ""};
+    }
+  }
+  void DrawInstall(Batch& b) {
+    const float listR = 1150;
+    // the drive: L2 / R2 (or left / right) walk the drives PKG Manager has packages on
+    std::string dl = pmDrives_.empty() ? std::string(pmDown_ ? "PKG Manager is not running on this console" : pmTried_ ? "No drive with packages" : "Looking at your drives...")
+                                       : pmDrives_[size_t(pmDrive_)].label + "  \xC2\xB7  " + std::to_string(pmDrives_[size_t(pmDrive_)].count) + " packages";
+    b.Text(kGutter, 140, Fit(b, dl, St(kBody, c::kTextHi), listR - kGutter - 200).c_str(), St(kBody, c::kTextHi));
+    if (pmDrives_.size() > 1) b.Text(listR, 144, "{L2} {R2} drive", St(kMeta, c::kTextDim), Align::kRight);
+    const float top = 200, rowH = 88, gap = 8; const int vis = 8;
+    if (pm_.empty()) b.Text(kGutter, top + 20, pmDown_ ? "Start PKG Manager (its tile on the home screen), then come back." : "Nothing to install here.", St(kMeta, c::kTextDim));
+    pmTop_ = std::clamp(pmTop_, std::max(0, pmSel_ - vis + 1), pmSel_);
+    for (int i = 0; i < vis && pmTop_ + i < int(pm_.size()); ++i) {
+      const int idx = pmTop_ + i; const PmPkg& k = pm_[size_t(idx)]; const bool f = idx == pmSel_;
+      const float y0 = top + i * (rowH + gap), y1 = y0 + rowH;
+      if (f) Round(b, kGutter, y0, listR, y1, 16, c::kFocusFill);
+      const Rgba under = f ? c::kFocusFill : c::kBg;
+      // PKG Manager's own verdict, in words: "same or newer" = it is installed; "base package" = an update for a game not on the console
+      const bool same = k.why.find("same or newer") != std::string::npos, needsBase = k.why.find("Base package") != std::string::npos;
+      const char* badge = (k.installed && !k.canInstall) || same ? "INSTALLED" : needsBase ? "NEEDS THE GAME" : !k.canInstall ? "CAN'T INSTALL"
+                        : k.installed ? "INSTALLED" : k.type == "update" ? "UPDATE" : k.type == "dlc" ? "ADD-ON" : "INSTALL";
+      const int tone = (k.installed || same) ? 1 : (!k.canInstall && !needsBase) ? 2 : 0;
+      const float pl = Pill(b, listR - 16, (y0 + y1) / 2, badge, f ? 0 : tone, under);
+      const float tx = kGutter + 24, tw = pl - 20 - tx;
+      b.Text(tx, y0 + 9, Fit(b, k.title, St(kBody, f ? c::kTextHi : c::kText), tw).c_str(), St(kBody, f ? c::kTextHi : c::kText));
+      std::string meta = k.tid + "  \xC2\xB7  " + (k.type == "update" ? "update " : k.type == "dlc" ? "add-on " : "") + k.version + "  \xC2\xB7  " + Gb(k.size) +
+                         (k.parts > 1 ? "  \xC2\xB7  " + std::to_string(k.parts) + " parts" : "") +
+                         (k.installed && !k.installedVersion.empty() ? "  \xC2\xB7  on console " + k.installedVersion : "") +
+                         (!k.canInstall && !same && !k.why.empty() ? "  \xC2\xB7  " + k.why : "");
+      b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
+    }
+    // right: what is installing now, live from PKG Manager
+    const float x0 = listR + 40, x1 = kEdge;
+    Round(b, x0, 140, x1, kBottom, 16, c::kSurface);
+    b.Text(x0 + 32, 168, "NOW", St(kMeta, c::kTextDim));
+    const json::Value& s = pmStatus_;
+    float y = 210;
+    if (PmBusy()) {
+      y = Wrap(b, x0 + 32, y, x1 - x0 - 64, s["title_name"].str().empty() ? s["title_id"].str() : s["title_name"].str(), St(kHead - 4, c::kTextHi), 2, 48) + 12;
+      const long long done = s["downloaded_bytes"].ll(), total = s["total_bytes"].ll();
+      const double pct = std::clamp(s["progress"].num(), 0.0, 100.0);
+      Round(b, x0 + 32, y, x1 - 32, y + 20, 10, c::kSurfaceHi);
+      if (pct > 0) Round(b, x0 + 32, y, x0 + 32 + (x1 - x0 - 64) * float(pct / 100.0), y + 20, 10, c::kAccent);
+      y += 44;
+      char t[160];
+      std::snprintf(t, sizeof t, "%.0f%%   %s of %s", pct, Gb(done).c_str(), Gb(total).c_str());
+      b.Text(x0 + 32, y, t, St(kBody, c::kTextHi)); y += 44;
+      if (pmRateAt_ > 0 && now_ - pmRateAt_ >= 3 && done > pmRateDone_) { pmRate_ = (done - pmRateDone_) / (now_ - pmRateAt_); pmRateAt_ = now_; pmRateDone_ = done; }
+      if (pmRateAt_ <= 0 || done < pmRateDone_) { pmRateAt_ = now_; pmRateDone_ = done; }
+      if (pmRate_ > 0 && total > done) {
+        const long long left = (long long)((total - done) / pmRate_);
+        std::snprintf(t, sizeof t, "%.1f MB/s   \xC2\xB7   about %lld min left", pmRate_ / 1e6, std::max(1LL, left / 60));
+        b.Text(x0 + 32, y, t, St(kMeta, c::kText, -0.03f)); y += 40;
+      }
+      if (s["is_multipart"].truthy()) { std::snprintf(t, sizeof t, "part %lld of %lld", s["current_part"].ll(), s["total_parts"].ll()); b.Text(x0 + 32, y, t, St(kMeta, c::kText, -0.03f)); y += 40; }
+      b.Text(x0 + 32, y + 10, "{SQUARE} Cancel this install", St(kMeta, c::kTextHi)); y += 70;
+    } else {
+      b.Text(x0 + 32, y, "Nothing installing", St(kHead - 4, c::kTextHi)); y += 70;
+      pmRateAt_ = 0; pmRate_ = 0;
+    }
+    b.Text(x0 + 32, y, "LATELY", St(kMeta, c::kTextDim)); y += 42;
+    const json::Value& jobs = pmQueue_["jobs"];
+    for (size_t i = jobs.size(); i-- > 0 && y < kBottom - 120;) {
+      const json::Value& j = jobs[i];
+      const std::string st = j["state"].str(), err = j["error"].str();
+      std::string line = j["title_name"].str() + ": " + (st == "canceled" && !err.empty() ? err : st);
+      y = Wrap(b, x0 + 32, y, x1 - x0 - 64, line, St(kMeta - 2, st == "failed" ? c::kAccent : c::kText, -0.03f), 2, 32) + 10;
+    }
+    b.Text(x0 + 32, kBottom - 52, "{CROSS} Install   {TRIANGLE} Look again", St(kMeta, c::kTextDim));
+  }
+
   void PressActivity(Button b) {
     if (b == kUp) logScroll_ = std::min(logScroll_ + 1, std::max(0, int(log_.size()) - 12));
     if (b == kDown) logScroll_ = std::max(0, logScroll_ - 1);
@@ -768,11 +928,11 @@ class App {
   // ---------------------------------------------------------------- top band: name, tabs, live chips
   void DrawTop(Batch& b) {
     b.Text(kGutter, 34, "BLAZINGMOUNT", St(kHead, c::kTextHi));
-    const char* tabs[] = {"Library", "Discover", "Activity", "Settings"};
+    const char* tabs[] = {"Library", "Discover", "Install", "Activity", "Settings"};
     float x = kGutter + b.Width("BLAZINGMOUNT", St(kHead, c::kTextHi)) + 64;
     b.Text(x, 44, "{L1}", St(kMeta, c::kTextDim));
     x += 64;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
       const bool on = int(tab_) == i;
       TextStyle st = St(kBody + 2, on ? c::kTextHi : c::kTextDim);
       b.Text(x, 42, tabs[i], st);
