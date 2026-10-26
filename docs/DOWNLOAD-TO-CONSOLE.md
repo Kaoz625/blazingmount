@@ -324,3 +324,26 @@ Passive only: it never launches anything. It waits until the title runs, then co
 2. App 0.5.0: `app/ps5/dell-build.sh`, then put-tree to `/data/homebrew/PPSA99280` when the app is not running.
 3. Worker: `download-to-console.py window` on mac1.
 4. Both consoles (cross-platform rule). DIGI5 has no M.2: it uses `/data` with the 55 GiB reserve.
+
+## Console pull (payload v2.9, 26 Oct 2026)
+
+Markus, 26 Oct: *"build nasbridge into blazing mount"*. NASBridge (J7mbo/nasbridge-ps5, GPL-3.0) copies games with a helper that
+runs ON the console and reads the server itself. We took the idea, not the code: `console/blazingmountd/src/bm_pull.c`.
+
+- **Why it is faster.** ftpsrv 1.16 takes ONE stream per file (section 1). A payload can `pwrite` anywhere, so the console opens
+  `conns` (default 8, max 16) Range connections, each fetching 8 MiB pieces **in order** and writing them at their own offset.
+  In order matters: exFAT zero-fills a write past the end of a file, synchronously. On 26 Oct an aria2c download with 8
+  far-apart segments made mac1's exFAT 8TB zero-fill ~40 GB and stalled every reader of that drive, imgserve included.
+- **The API.** `POST /api/pull?src=&port=&dest=&size=&conns=` (header `X-BM-Request: 1`), `POST /api/pull?cancel=1`,
+  `GET /api/pull`. `src` is `/raw/<image.ffpfsc>` on imgserve (new route: the whole image file with Range) or `/d/` `/t/` on
+  dirserve. `dest` must be under `<drive>/blz-stage/incoming/`, the same rule as `/api/sha256`. One job at a time (409).
+- **Resume.** `<dest>.blzpull` holds one byte per piece (`1` = written in full). The same POST again fetches only missing pieces.
+  The worker deletes the record once the file is pulled and its hashes are taken.
+- **Never a wrong file.** Each 206 answer's Content-Range must name exactly the bytes and the total size asked for.
+- **Verification is unchanged.** The worker hashes mac1's own copy per 1 GiB piece and the console hashes the same ranges.
+- **Fallback.** `download-to-console.py --via auto` (default) pulls only when the payload answers `GET /api/pull` AND a HEAD on
+  the first file's source succeeds; otherwise it is the FTP push. `--via ftp|pull` forces one.
+- **Tests.** `host/test_pull.py` (payload only: clean, cut connections, cancel + resume, wrong total, refusals) and
+  `host/test_download_e2e.py`, which now runs the whole Download -> switch -> Remove local copy story twice: FTP push and
+  console pull. Proven with the host build against mac1's test imgserve on :4459: Cloudberry Kingdom, 647,823,360 B, 4
+  connections, 21.5 MB/s over the MacBook's Wi-Fi, sha256 equal to mac1's file.

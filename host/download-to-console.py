@@ -26,6 +26,11 @@ the same range itself (payload 2.8 GET /api/sha256), so nothing is read back ove
 again from its start (ftpsrv's REST n + STOR truncates the file at n). With an older payload the pieces wait, unverified, and
 nothing is switched until `verify` has passed.
 
+CONSOLE PULL (payload 2.9, 26 Oct 2026). When the console's payload answers GET /api/pull and imgserve serves the image whole
+(/raw/<name>), the CONSOLE fetches the bytes itself on --conns Range connections (bm_pull.c; NASBridge's copier was the teacher)
+instead of this tool pushing them on one FTP stream. mac1 then hashes its own copy per piece and the same /api/sha256 check runs,
+so "every byte checked" holds either way. --via ftp forces the old push; auto falls back to it on an older payload or imgserve.
+
 RESUMES. Stopped, cut off, mac1 restarted: the next run goes on from the console's .part size (the journal holds the hashes of the
 pieces before it; the current piece is re-hashed from the local file).
 
@@ -252,6 +257,26 @@ class Console:
             return None, 0
         except (urllib.error.URLError, OSError, ValueError, socket.timeout):
             return None, 0
+
+    def pull_status(self):
+        """payload 2.9 GET /api/pull, or None (older payload / no answer)."""
+        try:
+            return json.loads(http(self.api + "/api/pull", timeout=15))
+        except (urllib.error.URLError, OSError, ValueError, socket.timeout):
+            return None
+
+    def pull(self, **q):
+        """POST /api/pull (start or cancel=1): (HTTP status, answer)."""
+        try:
+            return 200, json.loads(http(self.api + "/api/pull?" + urllib.parse.urlencode(q), method="POST",
+                                        headers={"X-BM-Request": "1"}, timeout=20))
+        except urllib.error.HTTPError as e:
+            try:
+                return e.code, json.loads(e.read() or b"{}")
+            except ValueError:
+                return e.code, {}
+        except (urllib.error.URLError, OSError, ValueError, socket.timeout) as e:
+            return 0, {"error": str(e)}
 
     def action(self, q):
         try:
@@ -516,6 +541,121 @@ def verify_piece(con, fj, f, k):
             fj["verified"].append(k)
         return True
     return False
+
+
+def pull_src(plan, f):
+    """(host path, port) the console pulls this file from: an image whole from imgserve /raw/, a folder game's file from dirserve /t/."""
+    if plan["kind"] == "image":
+        return "/raw/" + f["rel"], int(IMGSERVE.rsplit(":", 1)[1])
+    return "/t/%s/%s" % (plan["key"], f["rel"]), int(DIRSERVE.rsplit(":", 1)[1])
+
+
+def pull_file(con, st, job, plan, f, rate, base_done, total, args):
+    """payload 2.9: the CONSOLE pulls the file on several connections (bm_pull.c); mac1 then hashes its own copy per piece so
+    verify_all checks every byte exactly as after an FTP send. Resumes from the console's piece record. Returns when whole."""
+    fj = job["files"].setdefault(f["rel"], {"size": f["size"], "pieces": [], "verified": [], "bad": {}})
+    src, port = pull_src(plan, f)
+    fails = 0
+    while True:
+        stop_check(args, job)
+        if not args.no_yield and streaming_now():
+            job["state"], job["msg"] = "waiting", "a streamed game is playing (imgserve busy): paused"
+            save_state(st)
+            log("%s: paused, imgserve is serving a streamed game; checking again in 60 s" % job["tid"])
+            while streaming_now():
+                time.sleep(60)
+        if fj["bad"]:                                        # a piece failed its check: drop the console's piece record over
+            try:                                             # FTP, so the console fetches the whole file again (rare)
+                c = con.ftp()
+                ftp_delete(c, f["dest"] + ".blzpull")
+                c.quit()
+            except NET_ERRORS as e:
+                log("%s: could not drop the piece record (%s); retrying" % (job["tid"], e))
+                time.sleep(30)
+                continue
+            log("%s: %s had %d bad piece(s): the console pulls it again" % (job["tid"], f["rel"], len(fj["bad"])))
+            fj["bad"], fj["verified"] = {}, []
+            save_state(st)
+        code, a = con.pull(src=src, port=port, dest=f["dest"], size=f["size"], conns=args.conns)
+        if code == 409 and "already pulling this file" not in a.get("error", ""):
+            raise SystemExit("%s: the console is pulling another file (%s); one at a time" % (job["tid"], a.get("error")))
+        if code not in (200, 409):
+            fails += 1
+            log("%s: console pull refused/unreachable (%s %s); again in %d s" % (job["tid"], code, a.get("error", ""), min(300, 15 * fails)))
+            if fails >= 8:
+                raise SystemExit("%s: the console would not pull %s: %s" % (job["tid"], f["rel"], a.get("error")))
+            time.sleep(min(300, 15 * fails))
+            continue
+        job["state"], job["msg"] = "sending", "the console pulls it on %d connections" % args.conns
+        save_state(st)
+        log("%s: %s - the console pulls it (%s, %d connections; %s already there)" % (job["tid"], f["rel"], gb(f["size"]), args.conns,
+                                                                                  gb(a.get("done") or 0)))
+        last_note = time.monotonic()
+        while True:
+            time.sleep(5)
+            s = con.pull_status() or {}
+            if s.get("dest") != f["dest"]:
+                break
+            rate.add(base_done + int(s.get("done") or 0))
+            if s.get("state") != "pulling":
+                break
+            if time.monotonic() - last_note >= args.every:
+                last_note = time.monotonic()
+                done, bps = base_done + int(s["done"]), rate.bps()
+                job["done"], job["rate"] = done, int(bps)
+                job["eta"] = int((total - done) / bps) if bps > 0 else 0
+                save_state(st)
+                log("%s: %s / %s (%.1f%%)  %.2f MB/s  ~%s left  (%d/%d pieces)" % (job["tid"], gb(done), gb(total), 100.0 * done / total,
+                    bps / 1e6, dur(job["eta"]) if bps else "?", s.get("pieces_done", 0), s.get("pieces", 0)))
+            try:
+                stop_check(args, job)
+            except Stop:
+                con.pull(cancel=1)
+                raise
+            if not args.no_yield and streaming_now():
+                con.pull(cancel=1)
+                log("%s: a streamed game started: pull paused (the pieces done stay on the console)" % job["tid"])
+                break
+        if s.get("state") == "done" and s.get("dest") == f["dest"]:
+            break
+        if s.get("state") == "failed":
+            fails += 1
+            log("%s: console pull failed (%s); again in %d s" % (job["tid"], s.get("err"), min(300, 15 * fails)))
+            if fails >= 8:
+                raise SystemExit("%s: console pull of %s failed %d times: %s" % (job["tid"], f["rel"], fails, s.get("err")))
+            time.sleep(min(300, 15 * fails))
+    npieces = (f["size"] + PIECE - 1) // PIECE                 # mac1's hashes of its own copy, for verify_all's on-console check
+    for k in range(len(fj["pieces"]), npieces):
+        fj["pieces"].append(local_piece_sha(f["src"], k, f["size"]))
+        save_state(st)
+    try:                                                       # the console's piece record is done with (it lives in incoming/)
+        c = con.ftp()
+        ftp_delete(c, f["dest"] + ".blzpull")
+        c.quit()
+    except NET_ERRORS as e:
+        log("%s: %s.blzpull left in incoming/ (%s)" % (job["tid"], f["rel"], e))
+
+
+def use_pull(con, args, plan):
+    """--via pull|ftp|auto: auto = pull when the console's payload answers GET /api/pull (2.9+) AND the host serves the first file
+    whole (imgserve /raw/ came with the same change: an older imgserve answers 404, and then FTP it is)."""
+    if args.via == "ftp":
+        return False
+    why = None
+    if con.pull_status() is None:
+        why = "this console's payload has no /api/pull (needs blazingmountd 2.9)"
+    else:
+        src, port = pull_src(plan, plan["files"][0])
+        base = IMGSERVE if port == int(IMGSERVE.rsplit(":", 1)[1]) else DIRSERVE
+        try:
+            urllib.request.urlopen(urllib.request.Request(base + urllib.parse.quote(src), method="HEAD"), timeout=15).close()
+        except (urllib.error.URLError, OSError, socket.timeout) as e:
+            why = "the host does not serve %s whole (%s): imgserve needs the /raw/ route" % (src, getattr(e, "code", e))
+    if why and args.via == "pull":
+        raise SystemExit("--via pull: " + why)
+    if why:
+        log("%s: FTP push, because %s" % (plan["tid"], why))
+    return not why
 
 
 def send_file(con, st, job, f, rate, base_done, total, args):
@@ -890,8 +1030,13 @@ def cmd_get(args):
         if args.notice and fresh:                            # once per title, not at every resume
             notice(con, "Downloading %s to your console: %s, about %s on this connection." % (plan["title"], gb(plan["total"]), dur(eta)))
         rate, base = Rate(), 0
+        pull = use_pull(con, args, plan)
+        log("%s: bytes move by %s" % (tid, "CONSOLE PULL (payload 2.9, %d connections)" % args.conns if pull else "FTP push (one stream)"))
         for f in plan["files"]:
-            send_file(con, st, job, f, rate, base, plan["total"], args)
+            if pull:
+                pull_file(con, st, job, plan, f, rate, base, plan["total"], args)
+            else:
+                send_file(con, st, job, f, rate, base, plan["total"], args)
             base += f["size"]
         job["done"] = plan["total"]
         job["state"], job["msg"] = "verifying", ""
@@ -970,10 +1115,13 @@ def finish(con, st, job, plan, args):
         bad = [f for f in plan["files"] if job["files"].get(f["rel"], {}).get("bad")]
         if not bad:
             return False
-        rate, base = Rate(), 0
+        rate, base, pull = Rate(), 0, use_pull(con, args, plan)
         for f in plan["files"]:
             if f in bad:
-                send_file(con, st, job, f, rate, base, plan["total"], args)
+                if pull:
+                    pull_file(con, st, job, plan, f, rate, base, plan["total"], args)
+                else:
+                    send_file(con, st, job, f, rate, base, plan["total"], args)
             base += f["size"]
     else:
         return False
@@ -1633,7 +1781,7 @@ def cmd_serve(args):
                         os.remove(stopf)
                     os.makedirs(os.path.join(HOME, "runs"), exist_ok=True)
                     cmd = [sys.executable, "-I", os.path.abspath(__file__), "get" if r["what"] == "download" else "remove-local",
-                           con.name if con.name != con.ip else con.ip, r["tid"], "--hub", HUB, "--every", str(args.every)]
+                           con.name if con.name != con.ip else con.ip, r["tid"], "--hub", HUB, "--every", str(args.every), "--via", args.via, "--conns", str(args.conns)]
                     cmd += ["--notice"] if r["what"] == "download" else ["--confirm"]   # the app's own confirm asked him
                     procs[key] = subprocess.Popen(cmd, stdout=open(os.path.join(HOME, "runs", key.replace(":", "-") + ".log"), "a"),
                                                   stderr=subprocess.STDOUT)
@@ -1684,6 +1832,9 @@ def main():
     ap.add_argument("--rate", default="0.85", help="MB/s used for time estimates (measured 24 Oct away: 0.86)")
     ap.add_argument("--no-switch", action="store_true", help="copy and verify only")
     ap.add_argument("--no-yield", action="store_true", help="do not pause while imgserve serves a streamed game")
+    ap.add_argument("--via", choices=("auto", "pull", "ftp"), default="auto",
+                    help="auto: the console pulls the bytes itself when its payload is 2.9+ (several connections), else FTP push")
+    ap.add_argument("--conns", type=int, default=8, help="connections for a console pull (1-16)")
     ap.add_argument("--while-playing", action="store_true", help="on-console copies run even while a game runs")
     ap.add_argument("--notice", action="store_true", help="a TV notice with size + time when a copy starts")
     ap.add_argument("--hub", default=HUB, help="team chat file for milestone lines")

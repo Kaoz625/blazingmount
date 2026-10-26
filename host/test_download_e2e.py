@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,8 +38,38 @@ TID = "PPSA90001"
 PIECE = 1 << 20
 
 
-def main():
+class RawFake(A.Fake):
+    """test_api's fake imgserve + imgserve's /raw/<image> (the whole file with Range): what payload 2.9's console pull reads."""
+    FILES = {}
+
+    def do_HEAD(self):
+        self.do_GET(head=True)
+
+    def do_GET(self, head=False):
+        name = urllib.parse.unquote(self.path[5:]) if self.path.startswith("/raw/") else None
+        if name is None:
+            return A.Fake.do_GET(self)
+        if name not in self.FILES:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers(); return
+        data = open(self.FILES[name], "rb").read()
+        a, b = 0, len(data) - 1
+        rng = self.headers.get("Range")
+        if rng:
+            x, y = rng.split("=")[1].split("-")
+            a, b = int(x), min(int(y or b), b)
+        self.send_response(206 if rng else 200)
+        if rng:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (a, b, len(data)))
+        self.send_header("Content-Length", str(b - a + 1))
+        self.end_headers()
+        if not head:
+            self.wfile.write(data[a:b + 1])
+
+
+def main(raw=False):
+    """raw=False: imgserve without /raw/ -> the tool falls back to the FTP push. raw=True: the console pulls (payload 2.9)."""
     fails = []
+    print("=== %s" % ("CONSOLE PULL (imgserve /raw/, payload 2.9)" if raw else "FTP PUSH (an imgserve without /raw/)"), flush=True)
 
     def check(cond, what):
         print(("PASS " if cond else "FAIL ") + what, flush=True)
@@ -85,7 +116,8 @@ def main():
         os.makedirs(d)
     open(os.path.join(root, "data", "shadowmount", "debug.log"), "w").write("")
     T.CFG["free"] = 200 * 1024 ** 3                     # AVBL: the tool keeps 50 GiB free when the payload's min_free_mb is 0
-    img = A.http.server.ThreadingHTTPServer(("127.0.0.1", 0), A.Fake)
+    RawFake.FILES = {name: image} if raw else {}
+    img = A.http.server.ThreadingHTTPServer(("127.0.0.1", 0), RawFake)
     ftp = T.TS(("127.0.0.1", 0), T.FTP)
     web = T.HS(("127.0.0.1", 0), T.Web)
     T.PORTS = {"ftp": ftp.server_address[1], "web": web.server_address[1], "api": aport, "img": -1, "dir": -1}
@@ -181,6 +213,7 @@ def main():
         check(code == 0, "serve --once: the get run finished (exit %d)" % code)
         n = -(-alpha["size"] // PIECE)
         check("all %d pieces match on the console" % n in lg, "all %d pieces checked by the payload's own /api/sha256" % n)
+        check(("CONSOLE PULL" in lg) == raw and ("FTP push" in lg) == (not raw), "the bytes moved by %s" % ("console pull" if raw else "FTP push"))
         local = os.path.join(hb, name)
         check(os.path.isfile(local) and open(local, "rb").read() == open(image, "rb").read(), "the image in the M.2's homebrew, byte for byte")
         stub = os.path.join(root, "mnt", "ext1", "blz-stage", "stub")
@@ -240,4 +273,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(raw=False) | main(raw=True))
