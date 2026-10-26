@@ -25,6 +25,8 @@
 //   GET  /api/icon/<TID>             icon0.png (local starter, else cached, else fetched from the host once)
 //   GET  /api/downloads              v2.8, docs/DOWNLOAD-TO-CONSOLE.md: the app's download requests + mac1's status + free space + route
 //   GET  /api/sha256?path=&off=&len= v2.8: SHA-256 of up to 1 GiB of a file under <drive>/blz-stage/incoming/ (mac1 verifies a download)
+//   GET  /api/pull, POST /api/pull?src=&port=&dest=&size=&conns= | ?cancel=1   v2.9 (bm_pull.c): the console pulls a host file into
+//                                    incoming/ on several Range connections, resumable; mac1 verifies with /api/sha256 as before
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
 //        | download | remove_local | cancel_dl (v2.8: one line per title in /data/blazing/downloads.tsv for mac1's worker)
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
@@ -923,6 +925,8 @@ static int api_sha256(sb_t *o, const char *query) {                 // the HTTP 
     return 200;
 }
 
+#include "bm_pull.c"               // v2.9: the console pulls a file from the host itself (POST/GET /api/pull)
+
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
 static const struct { const char *k, *type, *help; } k_keys[] = {
     { "host", "s", "The computer with your game drives (imgserve)" },
@@ -1240,6 +1244,16 @@ static void api_handle(int s) {
             if (err) { sb_f(&b, "{\"ok\":false,\"error\":"); sb_js(&b, err); sb_put(&b, "}", 1); reply_json(s, 400, &b); }
             else { sb_f(&b, "{\"ok\":true,\"queued\":"); sb_js(&b, what); sb_put(&b, "}", 1); reply_json(s, 200, &b); }
         }
+    }
+    else if (!strcmp(method, "GET") && !strcmp(target, "/api/pull")) { api_pull_status(&b); reply_json(s, 200, &b); }
+    else if (!strcmp(method, "POST") && !strcmp(target, "/api/pull")) {
+        char v[8];
+        if (!strcasestr(req, "\nX-BM-Request: 1")) { sb_f(&b, "{\"ok\":false,\"error\":\"missing X-BM-Request header\"}"); reply_json(s, 403, &b); }
+        else if (get_q(query, "cancel", v, sizeof v)) {
+            pthread_mutex_lock(&g_pull_mu); int on = !strcmp(g_pull.state, "pulling"); if (on) g_pull.cancel = 1; pthread_mutex_unlock(&g_pull_mu);
+            sb_f(&b, "{\"ok\":%s}", on ? "true" : "false"); reply_json(s, 200, &b);
+        }
+        else { int code = api_pull_start(&b, query); reply_json(s, code, &b); }
     }
     else if (!strcmp(method, "GET") && !strcmp(target, "/")) reply(s, 200, "text/html; charset=utf-8", k_page, sizeof k_page - 1);
     else { sb_f(&b, "{\"error\":\"not found\"}"); reply_json(s, 404, &b); }
