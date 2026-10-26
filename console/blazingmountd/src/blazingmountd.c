@@ -204,24 +204,38 @@ static int connect_ms(const char *ip, int port, int ms) {   // connected blockin
     return s;
 }
 
+// A connected socket to host:port on the current route (LAN, or the tsnet proxy: then *via_proxy = 1 and the request goes in absolute
+// form), or -1. The route used to stick: once a LAN hiccup moved it to TAILNET (an imgserve restart, 26 Oct 18:56), it stayed there,
+// even at home, until the proxy failed too. Now, while on TAILNET, the LAN is tried first again at most every LAN_RETRY_S seconds.
+// Called from the main loop and the pull workers: the route globals are plain ints/time_t, a race only costs one extra LAN try.
+#ifndef LAN_RETRY_S
+#define LAN_RETRY_S 60                // tests build with a few seconds
+#endif
+static time_t g_lan_tried;
+static int route_connect(const char *host, int port, int timeout_s, int *via_proxy) {
+    *via_proxy = 0;
+    if (!(g_px_port && g_ts_port)) return connect_ms(host, port, timeout_s * 1000);
+    int first = g_route;
+    if (first == 1 && time(NULL) - g_lan_tried >= LAN_RETRY_S) { first = 0; g_lan_tried = time(NULL); }
+    for (int k = 0; k < 2; k++) {
+        int r = k == 0 ? first : 1 - first;
+        int s = r == 0 ? connect_ms(host, port, LAN_CONNECT_MS) : connect_ms(g_px_host, g_px_port, timeout_s * 1000);
+        if (s < 0) continue;
+        *via_proxy = r;
+        if (r != g_route) {
+            g_route = r;
+            if (r) logf_("route: LAN server %s:%d unreachable -> TAILNET %s:%d via proxy %s:%d", host, port, g_ts_host, g_ts_port, g_px_host, g_px_port);
+            else logf_("route: LAN server %s:%d answers again", host, port);
+        }
+        return s;
+    }
+    return -1;
+}
+
 // GET path. Body goes to outfd (>= 0) or into *mem (malloc'd, NUL-terminated). Returns body bytes, or -1 (connect/IO), -2 (non-2xx).
 static long long http_get(const char *host, int port, const char *path, int outfd, char **mem, int timeout_s, int *status_out) {
     if (status_out) *status_out = 0;
-    int s = -1, via_proxy = 0;
-    if (g_px_port && g_ts_port) {
-        for (int k = 0; k < 2 && s < 0; k++) {
-            int r = k == 0 ? g_route : 1 - g_route;
-            s = r == 0 ? connect_ms(host, port, LAN_CONNECT_MS) : connect_ms(g_px_host, g_px_port, timeout_s * 1000);
-            if (s >= 0) {
-                via_proxy = r;
-                if (r != g_route) {
-                    g_route = r;
-                    if (r) logf_("route: LAN server %s:%d unreachable -> TAILNET %s:%d via proxy %s:%d", host, port, g_ts_host, g_ts_port, g_px_host, g_px_port);
-                    else logf_("route: LAN server %s:%d answers again", host, port);
-                }
-            }
-        }
-    } else s = connect_ms(host, port, timeout_s * 1000);
+    int via_proxy = 0, s = route_connect(host, port, timeout_s, &via_proxy);
     if (s < 0) return -1;
     struct timeval tv = { timeout_s, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);

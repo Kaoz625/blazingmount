@@ -7,6 +7,8 @@ Checks:
   2. connections cut in the middle of a piece are fetched again from the piece's start and the file is still exact
   3. cancel mid-way -> state cancelled with the done pieces kept; the same POST again RESUMES (only the missing pieces are served)
   4. a server whose Content-Range total is not the size asked for is never written: state failed, the error says what came back
+  6. ROUTE: the LAN server is down -> the pull goes through the tsnet proxy (TAILNET); the LAN comes back -> within LAN_RETRY_S the
+     route is LAN again by itself (it used to stick on TAILNET at home after any hiccup, 26 Oct), and the next pull uses the LAN
   5. refused: no X-BM-Request header, dest outside <drive>/blz-stage/incoming/, a src that is not /raw/ /d/ /t/, a port that is
      not imgserve's or dirserve's, a second job while one runs (409)
 """
@@ -71,6 +73,32 @@ class Fake(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class Proxy(http.server.BaseHTTPRequestHandler):
+    """the tsnet payload's HTTP proxy: an absolute-form GET is answered by the host server it stands for (TARGET)."""
+    protocol_version = "HTTP/1.0"
+    TARGET, HITS = 0, [0]
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        Proxy.HITS[0] += 1
+        path = "/" + self.path.split("/", 3)[3] if self.path.startswith("http://") else self.path
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (Proxy.TARGET, path), headers={k: v for k, v in self.headers.items() if k.lower() == "range"})
+        try:
+            r = urllib.request.urlopen(req, timeout=30)
+        except urllib.error.HTTPError as e:
+            r = e
+        body = r.read()
+        self.send_response(r.status)
+        for k in ("Content-Range",):
+            if r.headers.get(k):
+                self.send_header(k, r.headers[k])
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
@@ -81,7 +109,7 @@ def main():
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", hport), Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     exe = os.path.join(tmp, "blazingmountd-host")
-    r = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-std=gnu11", '-DBM_VERSION="pull-test"', "-DBM_API_PORT=%d" % aport,
+    r = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-std=gnu11", '-DBM_VERSION="pull-test"', "-DBM_API_PORT=%d" % aport, "-DLAN_RETRY_S=3",
                         "-I" + OUT, "-o", exe, os.path.join(SRC, "blazingmountd.c")], capture_output=True, text=True)
     if r.returncode or r.stderr.strip():
         print(r.stderr); sys.exit("build failed or warned")
@@ -177,6 +205,37 @@ def main():
         check(post(src="/raw/game.ffpfsc", port=22, dest=dest, size=1)[0] == 400, "5. a port that is not imgserve/dirserve: 400")
         log = open(os.path.join(b, "blazingmountd.log")).read()
         check("pull: done /raw/game.ffpfsc" in log and "pull: cancelled" in log, "the log records each job")
+
+        # 6. route: LAN down -> TAILNET via the proxy; LAN back -> LAN again by itself
+        proc.terminate(); proc.wait(5)
+        lan, pport = free_port(), free_port()
+        Proxy.TARGET = hport
+        px = http.server.ThreadingHTTPServer(("127.0.0.1", pport), Proxy)
+        threading.Thread(target=px.serve_forever, daemon=True).start()
+        open(os.path.join(b, "mount.conf"), "w").write("host 127.0.0.1\nport %d\nmin_free_mb 0\ntsnet 1\nproxy 127.0.0.1 %d\n"
+                                                       "server_ts localhost %d\nfw 10.20\npoll_secs 3600\n" % (lan, pport, lan))
+        open(os.path.join(b, "blazingmountd.log"), "w").write("")
+        proc = subprocess.Popen([exe], env=dict(os.environ, BM_ROOT=root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        wait(lambda s: True, 10)
+        d3 = "/mnt/ext1/blz-stage/incoming/route.part"
+        FILES["small.ffpfsc"] = data[:3 * MIB]
+        post(src="/raw/small.ffpfsc", port=lan, dest=d3, size=3 * MIB, conns=2)
+        s = wait(lambda s: s["state"] != "pulling")
+        st = json.loads(urllib.request.urlopen(api + "/api/status", timeout=10).read())
+        check(s["state"] == "done" and disk(d3) == data[:3 * MIB] and Proxy.HITS[0] > 0, "6. LAN down: pulled through the proxy (%d proxied requests)" % Proxy.HITS[0])
+        check(st.get("route") == "TAILNET", "6. route TAILNET while the LAN server is down (%s)" % st.get("route"))
+        back = http.server.ThreadingHTTPServer(("127.0.0.1", lan), Fake)          # the LAN server answers again
+        threading.Thread(target=back.serve_forever, daemon=True).start()
+        time.sleep(4)                                                             # > LAN_RETRY_S
+        os.remove(root + d3); os.remove(root + d3 + ".blzpull")
+        hits = Proxy.HITS[0]
+        post(src="/raw/small.ffpfsc", port=lan, dest=d3, size=3 * MIB, conns=2)
+        s = wait(lambda s: s["state"] != "pulling")
+        st = json.loads(urllib.request.urlopen(api + "/api/status", timeout=10).read())
+        log = open(os.path.join(b, "blazingmountd.log")).read()
+        check(s["state"] == "done" and st.get("route") == "LAN" and "answers again" in log, "6. LAN back: route LAN again by itself (%s)" % st.get("route"))
+        check(Proxy.HITS[0] - hits <= 1, "6. the pull after that used the LAN (%d proxied)" % (Proxy.HITS[0] - hits))
+        back.shutdown(); px.shutdown()
     finally:
         proc.terminate(); proc.wait(5)
         srv.shutdown()

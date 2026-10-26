@@ -47,9 +47,8 @@ static int pull_src_ok(const char *s) {
 // one Range request; the socket is left at the first body byte (the header bytes already read past it go to *pre). -1 = error.
 static int pull_open(const conf_t *c, int port, const char *src, long long a, long long b, long long want_total,
                      char *pre, size_t *pre_n, char *why, size_t wn) {
-    int via_px = g_route && g_px_port && g_ts_port;                  // the daemon's route (LAN or the tsnet proxy); read-only here
-    int s = via_px ? connect_ms(g_px_host, g_px_port, PULL_TIMEOUT_S * 1000) : connect_ms(c->host, port, PULL_TIMEOUT_S * 1000);
-    if (s < 0) { snprintf(why, wn, "connect %s:%d failed", via_px ? g_px_host : c->host, via_px ? g_px_port : port); return -1; }
+    int via_px = 0, s = route_connect(c->host, port, PULL_TIMEOUT_S, &via_px);    // the daemon's route, LAN tried again every minute
+    if (s < 0) { snprintf(why, wn, "connect %s:%d failed (LAN and tailnet)", c->host, port); return -1; }
     struct timeval tv = { PULL_TIMEOUT_S, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     char enc[2200], req[2600];
