@@ -28,6 +28,7 @@
 //   GET  /api/pull, POST /api/pull?src=&port=&dest=&size=&conns= | ?cancel=1   v2.9 (bm_pull.c): the console pulls a host file into
 //                                    incoming/ on several Range connections, resumable; mac1 verifies with /api/sha256 as before
 //   GET  /api/pm/drives|packages|queue|status, POST /api/pm/install?path=|cancel?id=|refresh   v2.9: install a PKG from the drives
+//   POST /api/smp/version | /api/smp/uninstall?tid=                       v2.9: calls ShadowMount+'s local API
 //                                    with no copy first, through PKG Manager on this console (:8844)
 //   GET  /api/store, POST /api/store/install?kind=app|payload|pkg&path=&name=&size=   v2.9 (bm_store.c): the homebrew store over the
 //                                    host's /homebrew.json + /hb/: app folders into the homebrew dir, payloads into a payload slot
@@ -941,8 +942,8 @@ static int api_sha256(sb_t *o, const char *query) {                 // the HTTP 
 #ifndef BM_PM_PORT
 #define BM_PM_PORT 8844
 #endif
-static int pm_http(const char *method, const char *path, const char *body, sb_t *out) {   // PKG Manager's HTTP status, or -1
-    int s = connect_ms("127.0.0.1", BM_PM_PORT, 2000);
+static int local_http(int port, const char *method, const char *path, const char *body, sb_t *out) {   // HTTP status, or -1
+    int s = connect_ms("127.0.0.1", port, 2000);
     if (s < 0) return -1;
     struct timeval tv = { 20, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -958,6 +959,9 @@ static int pm_http(const char *method, const char *path, const char *body, sb_t 
     if (e && st > 0) sb_put(out, e + 4, r.n - (size_t)(e + 4 - r.b));
     free(r.b);
     return e ? st : -1;
+}
+static int pm_http(const char *method, const char *path, const char *body, sb_t *out) {   // PKG Manager's HTTP status, or -1
+    return local_http(BM_PM_PORT, method, path, body, out);
 }
 
 static void reply_json(int s, int code, sb_t *b);
@@ -987,6 +991,32 @@ static void api_pm(int s, const char *method, const char *target, const char *qu
         } else st = pm_http("POST", "/api/packages/refresh", "{}", &b);
     } else { sb_puts(&b, "{\"error\":\"not found\"}"); reply_json(s, 404, &b); free(b.b); return; }
     if (st < 0) { free(b.b); b.b = NULL; b.n = 0; sb_puts(&b, "{\"ok\":false,\"error\":\"PKG Manager is not running on this console (:8844)\"}"); reply_json(s, 502, &b); }
+    else reply_json(s, st, &b);
+    free(b.b);
+}
+
+// Markus 27 Oct 2026: BlazingMount calls his ShadowMount+, never replaces it. SMP's API listens on 127.0.0.1 only (:10101, every
+// call a JSON POST), so the app and the Macs reach it through this payload:
+//   POST /api/smp/version                    -> SMP /api/v1/version
+//   POST /api/smp/uninstall?tid=<TITLE ID>   -> SMP /api/v1/games/uninstall {"title_id"} (sceAppInstUtilAppUnInstall; SMP refuses
+//                                               a running game itself)                     (both need header X-BM-Request: 1)
+#ifndef BM_SMP_PORT
+#define BM_SMP_PORT 10101
+#endif
+static void api_smp(int s, const char *method, const char *target, const char *query, const char *req) {
+    sb_t b = { 0 }; int st;
+    const char *what = target + 9;                                   // after "/api/smp/"
+    char tid[16] = "", body[64];
+    if (strcmp(method, "POST") || (strcmp(what, "version") && strcmp(what, "uninstall"))) { sb_puts(&b, "{\"error\":\"not found\"}"); reply_json(s, 404, &b); free(b.b); return; }
+    if (!strcasestr(req, "\nX-BM-Request: 1")) { sb_puts(&b, "{\"ok\":false,\"error\":\"missing X-BM-Request header\"}"); reply_json(s, 403, &b); free(b.b); return; }
+    if (!strcmp(what, "version")) st = local_http(BM_SMP_PORT, "POST", "/api/v1/version", "{}", &b);
+    else {
+        if (!get_q(query, "tid", tid, sizeof tid) || !valid_tid(tid)) { sb_puts(&b, "{\"ok\":false,\"error\":\"bad title id\"}"); reply_json(s, 400, &b); free(b.b); return; }
+        snprintf(body, sizeof body, "{\"title_id\":\"%s\"}", tid);
+        st = local_http(BM_SMP_PORT, "POST", "/api/v1/games/uninstall", body, &b);
+        logf_("ui: uninstall %s (ShadowMount+) -> HTTP %d %.200s", tid, st, b.b ? b.b : "");
+    }
+    if (st < 0) { free(b.b); b.b = NULL; b.n = 0; sb_puts(&b, "{\"ok\":false,\"error\":\"ShadowMount+ API is not answering on this console (:10101)\"}"); reply_json(s, 502, &b); }
     else reply_json(s, st, &b);
     free(b.b);
 }
@@ -1312,6 +1342,7 @@ static void api_handle(int s) {
         }
     }
     else if (!strncmp(target, "/api/pm/", 8)) api_pm(s, method, target, query, req);
+    else if (!strncmp(target, "/api/smp/", 9)) api_smp(s, method, target, query, req);
     else if (!strcmp(target, "/api/store") || !strcmp(target, "/api/store/install")) api_store(s, method, target, query, req);
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/pull")) { api_pull_status(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "POST") && !strcmp(target, "/api/pull")) {
