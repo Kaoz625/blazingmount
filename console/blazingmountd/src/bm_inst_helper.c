@@ -27,6 +27,11 @@ int main(void) {
     struct timeval tv = { 120, 0 };                                // blazingmountd polls every second; silence = it is gone
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     int up = ai_bring_up() == 0, installed = 0;
+#ifdef __PROSPERO__
+    FILE *lf = fopen("/data/blazing/inst-helper.log", "a");      // one line per helper: what the set-up and the install answered
+    if (lf) fprintf(lf, "helper pid %d: netctl 0x%08x usersvc 0x%08x net 0x%08x appinstutil %s\n", (int)getpid(),
+                    (unsigned)g_ai_pre[0], (unsigned)g_ai_pre[1], (unsigned)g_ai_pre[2], up ? "ready" : g_ai_why);
+#endif
     ih_req_t q; ih_resp_t r;
     while (rd(s, &q, sizeof q) == 0 && q.magic == IH_MAGIC && q.op != IH_BYE) {
         memset(&r, 0, sizeof r); r.magic = IH_MAGIC;
@@ -34,7 +39,12 @@ int main(void) {
         if (!up) { r.rc = -1; snprintf(r.status, sizeof r.status, "unavailable"); snprintf(r.cid, sizeof r.cid, "%.47s", g_ai_why); }
         else if (q.op == IH_INSTALL) {
             if (installed) r.rc = (int32_t)AI_INVALID_SLOT;            // one per process, by design
-            else { r.rc = ai_install_uri(q.uri, q.name, r.cid, sizeof r.cid); installed = r.rc == 0; }
+            else {
+                r.rc = ai_install_uri(q.uri, q.name, r.cid, sizeof r.cid); installed = r.rc == 0;
+#ifdef __PROSPERO__
+                if (lf) { fprintf(lf, "  InstallByPackage %s -> 0x%08x cid %s\n", q.uri, (unsigned)r.rc, r.cid); fflush(lf); }
+#endif
+            }
         } else if (q.op == IH_STATUS) {
             ai_status_t *st = calloc(1, sizeof *st);
             r.rc = st ? ai_get_status(q.cid, st) : -1;
@@ -47,6 +57,9 @@ int main(void) {
         if (wr(s, &r, sizeof r)) break;
     }
     if (up && ai_term) ai_term();
+#ifdef __PROSPERO__
+    if (lf) fclose(lf);
+#endif
     close(s);
     return 0;
 }

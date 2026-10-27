@@ -42,6 +42,7 @@ static int (*ai_init)(void), (*ai_term)(void);
 static int (*ai_by_package)(ai_meta_t *, ai_pkg_info_t *, ai_playgo_t *);
 static int (*ai_get_status)(const char *, ai_status_t *);
 static char g_ai_why[160];
+static int g_ai_pre[3];                    // NetCtl / UserService / Net init results (the helper logs them)
 
 #ifdef __PROSPERO__
 #include <ps5/kernel.h>
@@ -57,6 +58,13 @@ static intptr_t ai_sym(const char *module, const char *sym) {   // the module's 
     return kernel_dynlib_dlsym(-1, h, sym);
 }
 static int ai_bring_up(void) {
+    // the same session set-up PKG Manager's helper makes before AppInstUtil (NetCtl, UserService with priority 256, Net): without it a
+    // fresh helper process got 0x80B22404 for every URL on DIGI5 13.60 (27 Oct) while the long-running payload's call worked
+    int (*netctl)(void) = (int (*)(void))ai_sym("libSceNetCtl.sprx", "sceNetCtlInit");
+    int (*usersvc)(int *) = (int (*)(int *))ai_sym("libSceUserService.sprx", "sceUserServiceInitialize");
+    int (*netinit)(void) = (int (*)(void))ai_sym("libSceNet.sprx", "sceNetInit");
+    int prio = 256;
+    g_ai_pre[0] = netctl ? netctl() : -1; g_ai_pre[1] = usersvc ? usersvc(&prio) : -1; g_ai_pre[2] = netinit ? netinit() : -1;
     int (*sysmod)(unsigned) = (int (*)(unsigned))ai_sym("libSceSysmodule.sprx", "sceSysmoduleLoadModuleInternal");
     if (sysmod) { sysmod(0x8000001d); sysmod(0x80000011); sysmod(0x80000010); sysmod(0x80000014); }   // IPMI, UserService, SystemService, AppInstUtil
     ai_init = (int (*)(void))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilInitialize");
