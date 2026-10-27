@@ -49,6 +49,7 @@ struct Rig {
   double t = 1000;
   bool offline = false;
   bool pmBusy = false;      // INSTALL: PKG Manager reports an install running
+  bool storeBusy = false;   // INSTALL > Store: a store install running
   // answers every request from the fixtures, as the API would
   void Pump() {
     for (int round = 0; round < 6; ++round) {
@@ -59,7 +60,8 @@ struct Rig {
         std::string base = r.path.substr(0, r.path.find('?'));
         std::string file = base == "/api/status" ? "status.json" : base == "/api/library" ? "library.json" : base == "/api/settings" ? "settings.json"
                          : base == "/api/log" ? "log.json" : base == "/api/pm/drives" ? "pm-drives.json" : base == "/api/pm/packages" ? "pm-packages.json"
-                         : base == "/api/pm/status" ? (pmBusy ? "pm-status-busy.json" : "pm-status.json") : base == "/api/pm/queue" ? "pm-queue.json" : "";
+                         : base == "/api/pm/status" ? (pmBusy ? "pm-status-busy.json" : "pm-status.json") : base == "/api/pm/queue" ? "pm-queue.json"
+                         : base == "/api/store" ? (storeBusy ? "store-busy.json" : "store.json") : "";
         if (offline) { app.OnResponse(r.path, 0, ""); continue; }
         if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0 || base == "/api/discover"
             || base == "/api/wishlist") {   // BM_HOSTDATA: the host's files
@@ -129,9 +131,12 @@ int main(int argc, char** argv) {
   if (on("06-remove-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kDown); r.Press(kCross); bad += Shot(font, r, out + "/06-remove-confirm"); }
   if (on("07-install-toast")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR2); r.Press(kR2); r.Press(kCross); bad += Shot(font, r, out + "/07-install-toast"); }
   if (on("08-activity")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Press(kR1); r.Wait(2.5); bad += Shot(font, r, out + "/08-activity"); }
-  if (on("30-install")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/30-install"); }
-  if (on("31-install-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); for (int i = 0; i < 6; ++i) r.Press(kDown); r.Press(kCross); r.Wait(0.5); bad += Shot(font, r, out + "/31-install-confirm"); }
-  if (on("32-installing")) { Rig r; r.dir = fx; r.pmBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/32-installing"); }
+  if (on("30-install")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/30-install"); }
+  if (on("31-install-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); for (int i = 0; i < 6; ++i) r.Press(kDown); r.Press(kCross); r.Wait(0.5); bad += Shot(font, r, out + "/31-install-confirm"); }
+  if (on("33-store")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/33-store"); }
+  if (on("34-store-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); for (int i = 0; i < 6; ++i) r.Press(kDown); r.Press(kCross); r.Wait(0.5); bad += Shot(font, r, out + "/34-store-confirm"); }
+  if (on("35-store-installing")) { Rig r; r.dir = fx; r.storeBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); r.Press(kDown); r.Press(kDown); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/35-store-installing"); }
+  if (on("32-installing")) { Rig r; r.dir = fx; r.pmBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/32-installing"); }
   if (on("09-settings")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kL1); r.Wait(0.5); for (int i = 0; i < 5; ++i) r.Press(kDown); r.Press(kRight); bad += Shot(font, r, out + "/09-settings"); }
   if (on("10-not-running")) { Rig r; r.dir = fx; r.offline = true; r.Wait(0); r.Wait(3); bad += Shot(font, r, out + "/10-not-running"); }
   if (on("11-all-grid")) { Rig r; r.dir = fx; r.Wait(0); r.Wait(1); for (int i = 0; i < 6; ++i) r.Press(kRight); r.Wait(1); bad += Shot(font, r, out + "/11-all-grid"); }

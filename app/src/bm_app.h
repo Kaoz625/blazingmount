@@ -119,7 +119,8 @@ inline std::string Gb(long long bytes) {
   if (bytes <= 0) return "-";
   if (bytes >= 100LL * 1000 * 1000 * 1000) std::snprintf(t, sizeof t, "%.0f GB", bytes / 1e9);
   else if (bytes >= 1000LL * 1000 * 1000) std::snprintf(t, sizeof t, "%.1f GB", bytes / 1e9);
-  else std::snprintf(t, sizeof t, "%.0f MB", bytes / 1e6);
+  else if (bytes >= 1000LL * 1000) std::snprintf(t, sizeof t, "%.0f MB", bytes / 1e6);
+  else std::snprintf(t, sizeof t, "%.0f KB", std::max(1.0, bytes / 1e3));   // a payload ELF is ~200 KB, not "0 MB"
   return t;
 }
 inline std::string FreeText(long long mb) {
@@ -337,6 +338,31 @@ class App {
       pmSel_ = 0;
       for (size_t i = 0; i < pm_.size(); ++i) if (pm_[i].path == keep) pmSel_ = int(i);
       pmFor_ = QueryArg(path, "drive");
+    } else if (Base(path) == "/api/store") {
+      storeTried_ = true;
+      if (!ok) { storeMissing_ = code == 404 || code == 0; return; }
+      storeMissing_ = false;
+      storeJob_ = v["job"];
+      std::vector<std::string> folders, slots;
+      for (const auto& f : v["have"]["folders"].items) folders.push_back(f.str());
+      for (const auto& f : v["have"]["slots"].items) slots.push_back(f.str());
+      std::string keep = stSel_ < int(store_.size()) ? store_[size_t(stSel_)].path : "";
+      store_.clear();
+      for (const auto& j : v["feed"].items) {
+        StoreItem it;
+        it.kind = j["kind"].str(); it.path = j["path"].str(); it.name = j["name"].str(); it.tid = j["title_id"].str();
+        it.version = j["version"].str(); it.size = j["size"].ll(); it.files = (int)j["files"].ll();
+        if (it.kind == "app") for (const auto& f : folders) if (f == it.path || (!it.tid.empty() && f.find(it.tid) != std::string::npos)) it.installed = true;
+        if (it.kind == "payload") for (const auto& f : slots) if (f == Slug(it.name.empty() ? it.path : it.name)) it.installed = true;
+        store_.push_back(std::move(it));
+      }
+      stSel_ = 0;
+      for (size_t i = 0; i < store_.size(); ++i) if (store_[i].path == keep) stSel_ = int(i);
+    } else if (Base(path) == "/api/store/install") {
+      if (code == 0) Toast("BlazingMount did not answer");
+      else if (!ok || !v["ok"].truthy()) Toast("Not installed: " + v["error"].str());
+      else Toast("Installing from your drives: you can keep using the console");
+      nextStore_ = 0;
     } else if (Base(path) == "/api/pm/status") {
       if (ok) pmStatus_ = std::move(v);
     } else if (Base(path) == "/api/pm/queue") {
@@ -399,7 +425,10 @@ class App {
     // INSTALL: PKG Manager's drives + packages (slow), its status + queue every second while the tab is open or a job runs
     if (connected_ && (tab_ == Tab::kInstall || PmBusy())) {
       if (now >= nextPmList_ && !Inflight("/api/pm/drives")) { Ask("GET", "/api/pm/drives"); nextPmList_ = now + 15.0; nextPkgs_ = 0; }
-      if (!pmDrives_.empty() && (pmFor_ != pmDrives_[size_t(pmDrive_)].id || now >= nextPkgs_) && !Inflight("/api/pm/packages") && tab_ == Tab::kInstall) {
+      if (tab_ == Tab::kInstall && storeOn_ && now >= nextStore_ && !Inflight("/api/store")) {
+        Ask("GET", "/api/store"); nextStore_ = now + (storeJob_["state"].str() == "running" ? 1.0 : 10.0);
+      }
+      if (!storeOn_ && !pmDrives_.empty() && (pmFor_ != pmDrives_[size_t(pmDrive_)].id || now >= nextPkgs_) && !Inflight("/api/pm/packages") && tab_ == Tab::kInstall) {
         Ask("GET", "/api/pm/packages?drive=" + pmDrives_[size_t(pmDrive_)].id); nextPkgs_ = now + 20.0;
       }
       if (now >= nextPm_ && !Inflight("/api/pm/status") && !Inflight("/api/pm/queue")) { Ask("GET", "/api/pm/status"); Ask("GET", "/api/pm/queue"); nextPm_ = now + 1.0; }
@@ -468,6 +497,13 @@ class App {
   json::Value pmStatus_, pmQueue_;
   std::string pmFor_;
   int pmDrive_ = 0, pmSel_ = 0, pmTop_ = 0;
+  // ---- STORE (0.6.1): the homebrew in "Apps and Emulators/PS5" on the drives (payload /api/store); the first source of the tab
+  struct StoreItem { std::string kind, path, name, tid, version; long long size = 0; int files = 0; bool installed = false; };
+  std::vector<StoreItem> store_;
+  json::Value storeJob_;
+  bool storeOn_ = true, storeTried_ = false, storeMissing_ = false;
+  int stSel_ = 0, stTop_ = 0;
+  double nextStore_ = 0;
   bool pmTried_ = false, pmDown_ = false, pmPicked_ = false;
   double nextPm_ = 0, nextPmList_ = 0, nextPkgs_ = 0, pmRateAt_ = 0, pmRate_ = 0;
   long long pmRateDone_ = 0;
@@ -717,6 +753,7 @@ class App {
     Ask_("download", g, "Download " + g.title + " to this console?", body, "Download", "remove", "Remove starter");
   }
   void PressConfirm(Button b) {
+    if (b == kCross && confirm_.action == "store_install") { Ask("POST", "/api/store/install?" + confirm_.tid); confirm_.active = false; return; }
     if (b == kCross && confirm_.action == "pm_install") { Ask("POST", "/api/pm/install?path=" + PathEnc(confirm_.tid)); confirm_.active = false; return; }
     if (b == kCross) { Act(confirm_.action, confirm_.tid); Toast(confirm_.yes + ": queued"); confirm_.active = false; }
     if (b == kSquare && !confirm_.altAction.empty()) { Act(confirm_.altAction, confirm_.tid); Toast(confirm_.alt + ": queued"); confirm_.active = false; }
@@ -731,14 +768,24 @@ class App {
     }
     return o;
   }
+  static std::string Slug(const std::string& s) {               // = bm_store.c store_slug: a payload slot name
+    std::string o;
+    for (unsigned char ch : s) { char c = char(std::tolower(ch)); o += (std::isalnum((unsigned char)c) || c == '-' || c == '_') ? c : '-'; }
+    return o;
+  }
   void PressInstall(Button b) {
+    // L2 / R2 (or left / right) walk the sources: the STORE first, then every drive PKG Manager has packages on
+    if (b == kLeft || b == kRight || b == kL2 || b == kR2) {
+      const int k = int(pmDrives_.size()) + 1, pos = storeOn_ ? 0 : pmDrive_ + 1;
+      const int next = (pos + ((b == kRight || b == kR2) ? 1 : k - 1)) % k;
+      storeOn_ = next == 0;
+      if (!storeOn_) { pmDrive_ = next - 1; pmPicked_ = true; pmSel_ = 0; pm_.clear(); } else nextStore_ = 0;
+      return;
+    }
+    if (storeOn_) { PressStore(b); return; }
     const int n = int(pm_.size());
     if (b == kUp && n) pmSel_ = (pmSel_ + n - 1) % n;
     if (b == kDown && n) pmSel_ = (pmSel_ + 1) % n;
-    if ((b == kLeft || b == kRight || b == kL2 || b == kR2) && pmDrives_.size() > 1) {
-      const int k = int(pmDrives_.size());
-      pmDrive_ = (pmDrive_ + ((b == kRight || b == kR2) ? 1 : k - 1)) % k; pmPicked_ = true; pmSel_ = 0; pm_.clear();
-    }
     if (b == kTriangle) Ask("POST", "/api/pm/refresh");
     if (b == kSquare && PmBusy()) Ask("POST", "/api/pm/cancel?id=" + std::to_string(pmQueue_["active_id"].ll()));
     if (b == kCross && pmSel_ < n) {
@@ -754,13 +801,81 @@ class App {
       confirm_ = {true, "pm_install", k.path, "Install " + k.title + "?", body, "Install", "", ""};
     }
   }
+  void PressStore(Button b) {
+    const int n = int(store_.size());
+    if (b == kUp && n) stSel_ = (stSel_ + n - 1) % n;
+    if (b == kDown && n) stSel_ = (stSel_ + 1) % n;
+    if (b == kTriangle) nextStore_ = 0;
+    if (b == kCross && stSel_ < n) {
+      const StoreItem& it = store_[size_t(stSel_)];
+      if (storeJob_["state"].str() == "running") { Toast("One install at a time: this one is still running"); return; }
+      if (it.installed) { Toast(it.name + " is already on this console"); return; }
+      const char* what = it.kind == "app" ? "App" : it.kind == "payload" ? "Payload" : "PKG";
+      std::string body = std::string(what) + (it.version.empty() ? "" : " " + it.version) + ", " + Gb(it.size) +
+                         (it.kind == "app" ? ". It is copied from your drives into this console's homebrew, then it shows up as a tile."
+                          : it.kind == "payload" ? ". It goes into the payload manager as its own slot; it is NOT loaded and NOT added to the boot list: load it there when you want it."
+                          : ". PKG Manager on this console installs it straight from your drives.");
+      std::string q = "kind=" + PathEnc(it.kind) + "&path=" + PathEnc(it.path) + "&name=" + PathEnc(it.name) + "&size=" + std::to_string(it.size);
+      confirm_ = {true, "store_install", q, "Install " + it.name + "?", body, "Install", "", ""};
+    }
+  }
+  void DrawStore(Batch& b, float listR) {
+    std::string head = storeMissing_ ? std::string("The store needs BlazingMount 2.9 on this console and imgserve on the drives")
+                     : !storeTried_ ? std::string("Looking at your drives...")
+                     : "Store  \xC2\xB7  Apps and Emulators on your drives  \xC2\xB7  " + std::to_string(store_.size()) + " items";
+    b.Text(kGutter, 140, Fit(b, head, St(kBody, c::kTextHi), listR - kGutter - 200).c_str(), St(kBody, c::kTextHi));
+    b.Text(listR, 144, "{L2} {R2} source", St(kMeta, c::kTextDim), Align::kRight);
+    const float top = 200, rowH = 88, gap = 8; const int vis = 8;
+    if (store_.empty() && storeTried_) b.Text(kGutter, top + 20, "Nothing in Apps and Emulators/PS5 yet.", St(kMeta, c::kTextDim));
+    stTop_ = std::clamp(stTop_, std::max(0, stSel_ - vis + 1), stSel_);
+    for (int i = 0; i < vis && stTop_ + i < int(store_.size()); ++i) {
+      const int idx = stTop_ + i; const StoreItem& it = store_[size_t(idx)]; const bool f = idx == stSel_;
+      const float y0 = top + i * (rowH + gap), y1 = y0 + rowH;
+      if (f) Round(b, kGutter, y0, listR, y1, 16, c::kFocusFill);
+      const Rgba under = f ? c::kFocusFill : c::kBg;
+      const char* badge = it.installed ? "INSTALLED" : it.kind == "app" ? "APP" : it.kind == "payload" ? "PAYLOAD" : "PKG";
+      const float pl = Pill(b, listR - 16, (y0 + y1) / 2, badge, f ? 0 : (it.installed ? 1 : 0), under);
+      const float tx = kGutter + 24, tw = pl - 20 - tx;
+      b.Text(tx, y0 + 9, Fit(b, it.name, St(kBody, f ? c::kTextHi : c::kText), tw).c_str(), St(kBody, f ? c::kTextHi : c::kText));
+      std::string meta = (it.tid.empty() ? std::string("") : it.tid + "  \xC2\xB7  ") + (it.version.empty() ? std::string("") : it.version + "  \xC2\xB7  ") + Gb(it.size) +
+                         (it.kind == "app" ? "  \xC2\xB7  " + std::to_string(it.files) + " files" : "");
+      b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
+    }
+    const float x0 = listR + 40, x1 = kEdge;
+    Round(b, x0, 140, x1, kBottom, 16, c::kSurface);
+    b.Text(x0 + 32, 168, "NOW", St(kMeta, c::kTextDim));
+    const json::Value& j = storeJob_;
+    const std::string st = j["state"].str();
+    float y = 210;
+    if (st == "running") {
+      y = Wrap(b, x0 + 32, y, x1 - x0 - 64, j["name"].str(), St(kHead - 4, c::kTextHi), 2, 48) + 12;
+      const long long done = j["bytes_done"].ll(), total = std::max(1LL, j["bytes"].ll());
+      const float frac = float(std::clamp(double(done) / double(total), 0.0, 1.0));
+      Round(b, x0 + 32, y, x1 - 32, y + 20, 10, c::kSurfaceHi);
+      if (frac > 0) Round(b, x0 + 32, y, x0 + 32 + (x1 - x0 - 64) * frac, y + 20, 10, c::kAccent);
+      y += 44;
+      char t[160]; std::snprintf(t, sizeof t, "%.0f%%   %s of %s   \xC2\xB7   file %lld of %lld", frac * 100.0, Gb(done).c_str(), Gb(total).c_str(),
+                                 j["files_done"].ll() + 1 > j["files"].ll() ? j["files"].ll() : j["files_done"].ll() + 1, j["files"].ll());
+      b.Text(x0 + 32, y, t, St(kMeta, c::kTextHi, -0.03f)); y += 40;
+      y = Wrap(b, x0 + 32, y, x1 - x0 - 64, j["step"].str(), St(kMeta - 2, c::kText, -0.03f), 2, 32) + 10;
+    } else {
+      b.Text(x0 + 32, y, "Nothing installing", St(kHead - 4, c::kTextHi)); y += 70;
+      if (st == "done" || st == "failed") {
+        b.Text(x0 + 32, y, "LAST", St(kMeta, c::kTextDim)); y += 42;
+        y = Wrap(b, x0 + 32, y, x1 - x0 - 64, j["name"].str() + ": " + (st == "done" ? j["step"].str() : "failed - " + j["err"].str()),
+                 St(kMeta - 2, st == "failed" ? c::kAccent : c::kText, -0.03f), 4, 32) + 10;
+      }
+    }
+    b.Text(x0 + 32, kBottom - 52, "{CROSS} Install   {TRIANGLE} Look again", St(kMeta, c::kTextDim));
+  }
   void DrawInstall(Batch& b) {
     const float listR = 1150;
+    if (storeOn_) { DrawStore(b, listR); return; }
     // the drive: L2 / R2 (or left / right) walk the drives PKG Manager has packages on
     std::string dl = pmDrives_.empty() ? std::string(pmDown_ ? "PKG Manager is not running on this console" : pmTried_ ? "No drive with packages" : "Looking at your drives...")
                                        : pmDrives_[size_t(pmDrive_)].label + "  \xC2\xB7  " + std::to_string(pmDrives_[size_t(pmDrive_)].count) + " packages";
     b.Text(kGutter, 140, Fit(b, dl, St(kBody, c::kTextHi), listR - kGutter - 200).c_str(), St(kBody, c::kTextHi));
-    if (pmDrives_.size() > 1) b.Text(listR, 144, "{L2} {R2} drive", St(kMeta, c::kTextDim), Align::kRight);
+    b.Text(listR, 144, "{L2} {R2} source", St(kMeta, c::kTextDim), Align::kRight);
     const float top = 200, rowH = 88, gap = 8; const int vis = 8;
     if (pm_.empty()) b.Text(kGutter, top + 20, pmDown_ ? "Start PKG Manager (its tile on the home screen), then come back." : "Nothing to install here.", St(kMeta, c::kTextDim));
     pmTop_ = std::clamp(pmTop_, std::max(0, pmSel_ - vis + 1), pmSel_);

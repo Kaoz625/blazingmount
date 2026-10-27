@@ -1,0 +1,107 @@
+{
+ "feed": [
+  {
+   "kind": "app",
+   "path": "Blazing Games (PPSA99190)",
+   "name": "Blazing Games",
+   "title_id": "PPSA99190",
+   "version": "01.000.000",
+   "size": 412000000,
+   "files": 220,
+   "icon": ""
+  },
+  {
+   "kind": "app",
+   "path": "Kodi (PPSA99420)",
+   "name": "Kodi",
+   "title_id": "PPSA99420",
+   "version": "01.000.000",
+   "size": 96000000,
+   "files": 1800,
+   "icon": ""
+  },
+  {
+   "kind": "app",
+   "path": "ProsperoEden (PPSA99008)",
+   "name": "ProsperoEden",
+   "title_id": "PPSA99008",
+   "version": "01.003.000",
+   "size": 860000000,
+   "files": 350,
+   "icon": ""
+  },
+  {
+   "kind": "app",
+   "path": "Twiso - PS2 ISO Launcher (PPSA99202)",
+   "name": "Twiso - PS2 ISO Launcher",
+   "title_id": "PPSA99202",
+   "version": "01.000.001",
+   "size": 31000000,
+   "files": 40,
+   "icon": ""
+  },
+  {
+   "kind": "app",
+   "path": "vkQuake (PPSA99010)",
+   "name": "vkQuake",
+   "title_id": "PPSA99010",
+   "version": "01.000.000",
+   "size": 180000000,
+   "files": 95,
+   "icon": ""
+  },
+  {
+   "kind": "pkg",
+   "path": "PS5Library-0.2.54.pkg",
+   "pkg": "Apps and Emulators/PS5/PS5Library-0.2.54.pkg",
+   "name": "PS5Library-0.2.54",
+   "title_id": "",
+   "version": "",
+   "size": 21000000,
+   "files": 1,
+   "icon": ""
+  },
+  {
+   "kind": "payload",
+   "path": "payloads/byepervisor_reborn.elf",
+   "name": "byepervisor_reborn",
+   "title_id": "",
+   "version": "",
+   "size": 180000,
+   "files": 1,
+   "icon": ""
+  },
+  {
+   "kind": "payload",
+   "path": "WebKit-Autoloader-Installer_v0.4.0.elf",
+   "name": "WebKit-Autoloader-Installer_v0.4.0",
+   "title_id": "",
+   "version": "",
+   "size": 260000,
+   "files": 1,
+   "icon": ""
+  }
+ ],
+ "have": {
+  "folders": [
+   "Kodi (PPSA99420)",
+   "PPSA99008"
+  ],
+  "slots": [
+   "blazingmountd",
+   "web-file-mgr"
+  ]
+ },
+ "job": {
+  "state": "done",
+  "kind": "app",
+  "path": "Kodi (PPSA99420)",
+  "name": "Kodi",
+  "step": "on the console in /mnt/ext1/homebrew/Kodi (PPSA99420)",
+  "err": "",
+  "files": 1800,
+  "files_done": 1800,
+  "bytes": 96000000,
+  "bytes_done": 96000000
+ }
+}
