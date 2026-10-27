@@ -7,7 +7,7 @@ Checks:
   2. app: every file of the folder pulled byte-exact into the homebrew dir (subfolders, an empty file), eboot.bin 0755, other 0644,
      no .blzpull records and no incoming/ folder left; installing it again is refused (already there)
   3. payload: the ELF in its own slot /data/pldmgr/payloads/local/<slot>/ (0755) + meta.json; the boot list is not touched
-  4. pkg: handed to PKG Manager as smb://<host>/mac1-8TB/Apps and Emulators/PS5/<file>
+  4. pkg: v2.10 starts BlazingMount's own installer job (/api/install; PKG Manager is that job's fallback, test_install.py)
   5. a file the host does not serve: the job fails and nothing reaches the homebrew dir
   6. refused: no X-BM-Request (403), an unknown kind / a '..' path / a payload without size (400), a second install while one runs (409)
 """
@@ -168,8 +168,9 @@ def main():
 
         install(kind="pkg", path="Store App.pkg", name="Store App")
         j = wait_job()
-        check(j["state"] == "done" and PM_SEEN and PM_SEEN[-1][0] == "/api/install"
-              and json.loads(PM_SEEN[-1][1])["path"] == "smb://127.0.0.1/mac1-8TB/Apps and Emulators/PS5/Store App.pkg", "4. pkg handed to PKG Manager (%s)" % (PM_SEEN[-1:] or j["err"]))
+        ij = json.loads(urllib.request.urlopen(api + "/api/install", timeout=10).read())
+        check(j["state"] == "done" and ij.get("src") == "Apps and Emulators/PS5/Store App.pkg" and ij.get("name") == "Store App",
+              "4. pkg -> BlazingMount's installer job (/api/install src %s, %s)" % (ij.get("src"), j["err"] or j["step"]))
 
         SHELF["Broken (PPSA90009)/eboot.bin"] = b"x" * 10
         SHELF["Broken (PPSA90009)/missing.bin"] = b"y" * 10

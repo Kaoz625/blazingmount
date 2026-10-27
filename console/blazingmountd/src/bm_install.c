@@ -492,6 +492,41 @@ static void inst_status(sb_t *b) {
     pthread_mutex_unlock(&g_inst_mu);
 }
 
+// start a job (the API and the store call this); the HTTP status, the JSON answer in *b
+static int inst_begin(const char *host, int port, int route, const char *up, const char *src, const char *name_in, sb_t *b) {
+    char name[200]; snprintf(name, sizeof name, "%s", name_in ? name_in : "");
+    if (!name[0]) { const char *f = strrchr(up, '/'); snprintf(name, sizeof name, "%s", f ? f + 1 : up); char *dot = strrchr(name, '.'); if (dot) *dot = 0; }
+    pthread_mutex_lock(&g_inst_mu);
+    if (inst_running_locked()) {
+        pthread_mutex_unlock(&g_inst_mu);
+        sb_puts(b, "{\"ok\":false,\"error\":\"an install is running (cancel it first)\"}"); return 409;
+    }
+    unsigned id = g_inst.id + 1;
+    memset(&g_inst, 0, sizeof g_inst);
+    g_inst.id = id; snprintf(g_inst.state, sizeof g_inst.state, "starting"); snprintf(g_inst.via, sizeof g_inst.via, "sony");
+    snprintf(g_inst.src, sizeof g_inst.src, "%s", src); snprintf(g_inst.name, sizeof g_inst.name, "%s", name);
+    snprintf(g_inst.up_host, sizeof g_inst.up_host, "%s", host); g_inst.up_port = port; g_inst.up_route = route;
+    snprintf(g_inst.up_path, sizeof g_inst.up_path, "%s", up);
+    g_inst.started = g_inst.moved = time(NULL); snprintf(g_inst.step, sizeof g_inst.step, "asking the source for its size");
+    pthread_mutex_unlock(&g_inst_mu);
+    logf_("ui: install %s from %s:%d%s (job %u)", name, host, port, up, id);
+    pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 512 * 1024);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int pc = pthread_create(&t, &at, inst_run, NULL);
+    pthread_attr_destroy(&at);
+    if (pc) { inst_set("failed", "no thread"); sb_puts(b, "{\"ok\":false,\"error\":\"no thread\"}"); return 500; }
+    sb_f(b, "{\"ok\":true,\"id\":%u}", id);
+    return 200;
+}
+// a drive pkg by its imgserve /pkgs.json path (the store's pkg kind uses this)
+static int inst_begin_shelf(const char *rel, const char *name, sb_t *b) {
+    if (!inst_rel_ok(rel)) { sb_puts(b, "{\"ok\":false,\"error\":\"not a pkg path\"}"); return 400; }
+    conf_t *c = malloc(sizeof *c); if (!c) return 500;
+    read_conf(c); char host[64]; snprintf(host, sizeof host, "%s", c->host); int port = c->port; free(c);
+    char up[1000]; snprintf(up, sizeof up, "/pkg/%s", rel);
+    return inst_begin(host, port, 1, up, rel, name, b);
+}
+
 static void api_install(int s, const char *method, const char *target, const char *query, const char *req) {
     sb_t b = { 0 };
     if (!strcmp(method, "GET") && !strcmp(target, "/api/install")) { inst_status(&b); reply_json(s, 200, &b); free(b.b); return; }
@@ -520,25 +555,7 @@ static void api_install(int s, const char *method, const char *target, const cha
     } else if (!(url[0] && inst_url_parse(url, host, sizeof host, &port, up, sizeof up))) {
         sb_puts(&b, "{\"ok\":false,\"error\":\"path=<a path from /api/install/pkgs> or url=http://<ip>:<port>/<file>.pkg\"}"); reply_json(s, 400, &b); free(b.b); return;
     }
-    if (!name[0]) { const char *f = strrchr(up, '/'); snprintf(name, sizeof name, "%s", f ? f + 1 : up); char *dot = strrchr(name, '.'); if (dot) *dot = 0; }
-    pthread_mutex_lock(&g_inst_mu);
-    if (inst_running_locked()) {
-        pthread_mutex_unlock(&g_inst_mu);
-        sb_puts(&b, "{\"ok\":false,\"error\":\"an install is running (cancel it first)\"}"); reply_json(s, 409, &b); free(b.b); return;
-    }
-    unsigned id = g_inst.id + 1;
-    memset(&g_inst, 0, sizeof g_inst);
-    g_inst.id = id; snprintf(g_inst.state, sizeof g_inst.state, "starting"); snprintf(g_inst.via, sizeof g_inst.via, "sony");
-    snprintf(g_inst.src, sizeof g_inst.src, "%s", path[0] && route ? path : url); snprintf(g_inst.name, sizeof g_inst.name, "%s", name);
-    snprintf(g_inst.up_host, sizeof g_inst.up_host, "%s", host); g_inst.up_port = port; g_inst.up_route = route;
-    snprintf(g_inst.up_path, sizeof g_inst.up_path, "%s", up);
-    g_inst.started = g_inst.moved = time(NULL); snprintf(g_inst.step, sizeof g_inst.step, "asking the source for its size");
-    pthread_mutex_unlock(&g_inst_mu);
-    logf_("ui: install %s from %s:%d%s (job %u)", name, host, port, up, id);
-    pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 512 * 1024);   // Sony's module loaders run here
-    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    int pc = pthread_create(&t, &at, inst_run, NULL);
-    pthread_attr_destroy(&at);
-    if (pc) { inst_set("failed", "no thread"); sb_puts(&b, "{\"ok\":false,\"error\":\"no thread\"}"); reply_json(s, 500, &b); free(b.b); return; }
-    sb_f(&b, "{\"ok\":true,\"id\":%u}", id); reply_json(s, 200, &b); free(b.b);
+    int code = inst_begin(host, port, route, up, path[0] && route ? path : url, name, &b);
+    reply_json(s, code, &b); free(b.b);
+
 }

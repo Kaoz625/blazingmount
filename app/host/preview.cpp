@@ -49,6 +49,7 @@ struct Rig {
   double t = 1000;
   bool offline = false;
   bool pmBusy = false;      // INSTALL: PKG Manager reports an install running
+  bool instBusy = false;    // INSTALL: BlazingMount's own installer (payload 2.10 /api/install) is installing
   bool storeBusy = false;   // INSTALL > Store: a store install running
   bool storeSlow = false;   // INSTALL > Store: the payload has not answered /api/store yet (it asks the host: up to 15 s)
   // answers every request from the fixtures, as the API would
@@ -62,7 +63,8 @@ struct Rig {
         std::string file = base == "/api/status" ? "status.json" : base == "/api/library" ? "library.json" : base == "/api/settings" ? "settings.json"
                          : base == "/api/log" ? "log.json" : base == "/api/pm/drives" ? "pm-drives.json" : base == "/api/pm/packages" ? "pm-packages.json"
                          : base == "/api/pm/status" ? (pmBusy ? "pm-status-busy.json" : "pm-status.json") : base == "/api/pm/queue" ? "pm-queue.json"
-                         : base == "/api/store" ? (storeBusy ? "store-busy.json" : "store.json") : "";
+                         : base == "/api/store" ? (storeBusy ? "store-busy.json" : "store.json")
+                         : base == "/api/install" && r.method == "GET" ? (instBusy ? "install-busy.json" : "install.json") : "";
         if (offline || (storeSlow && base == "/api/store")) { app.OnResponse(r.path, 0, ""); continue; }
         if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0 || base == "/api/discover"
             || base == "/api/wishlist") {   // BM_HOSTDATA: the host's files
@@ -138,6 +140,7 @@ int main(int argc, char** argv) {
   if (on("34-store-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); for (int i = 0; i < 6; ++i) r.Press(kDown); r.Press(kCross); r.Wait(0.5); bad += Shot(font, r, out + "/34-store-confirm"); }
   if (on("36-store-waiting")) { Rig r; r.dir = fx; r.storeSlow = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); bad += Shot(font, r, out + "/36-store-waiting"); }
   if (on("35-store-installing")) { Rig r; r.dir = fx; r.storeBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); r.Press(kDown); r.Press(kDown); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/35-store-installing"); }
+  if (on("33-bm-installing")) { Rig r; r.dir = fx; r.instBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/33-bm-installing"); }
   if (on("32-installing")) { Rig r; r.dir = fx; r.pmBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/32-installing"); }
   if (on("09-settings")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kL1); r.Wait(0.5); for (int i = 0; i < 5; ++i) r.Press(kDown); r.Press(kRight); bad += Shot(font, r, out + "/09-settings"); }
   if (on("10-not-running")) { Rig r; r.dir = fx; r.offline = true; r.Wait(0); r.Wait(3); bad += Shot(font, r, out + "/10-not-running"); }

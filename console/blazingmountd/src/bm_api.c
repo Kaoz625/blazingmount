@@ -1024,8 +1024,9 @@ static void api_smp(int s, const char *method, const char *target, const char *q
     free(b.b);
 }
 
-#include "bm_store.c"              // v2.9: the homebrew store (GET /api/store, POST /api/store/install)
+static void reply(int s, int code, const char *ctype, const char *body, size_t n);   // below
 #include "bm_install.c"            // v2.10: BlazingMount installs a PKG itself from the host (GET/POST /api/install, /cancel, /pkgs)
+#include "bm_store.c"              // v2.9: the homebrew store (GET /api/store, POST /api/store/install; its pkgs go to bm_install.c)
 
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
 static const struct { const char *k, *type, *help; } k_keys[] = {

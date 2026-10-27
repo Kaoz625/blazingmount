@@ -6,7 +6,7 @@
 //            run bits set like a starter (file_mode), then the folder renamed into the homebrew dir (ShadowMount registers the tile)
 //   payload  an ELF: pulled the same way, then put in its own payload-manager slot /data/pldmgr/payloads/local/<slot>/ with a
 //            meta.json; NOT loaded and NOT added to the boot list (that stays Markus's choice in the payload manager)
-//   pkg      handed to PKG Manager on this console (his own, upstream): smb://<host>/mac1-8TB/<path>, its progress in /api/pm/status
+//   pkg      v2.10: BlazingMount's own installer (bm_install.c, progress in /api/install; PKG Manager is its fallback)
 // #include'd ONCE into bm_api.c after api_pm (it uses pull_begin, g_pull, pm_http, api_get, js_str, read_conf, file_mode).
 //
 //   GET  /api/store                         {"feed": <host /homebrew.json or null>, "have": {"folders": [...], "slots": [...]}, "job": {...}}
@@ -88,15 +88,13 @@ static void *store_thread(void *arg) {
     char inc[700], src[1100], dest[1400], fp[1400], fp2[1400];
     snprintf(inc, sizeof inc, "%s/blz-stage/incoming/store-%s", drive, slug);
 
-    if (!strcmp(kind, "pkg")) {                                   // PKG Manager installs it (his own, upstream)
-        sb_t j = { 0 }, b = { 0 };
-        char smb[900]; snprintf(smb, sizeof smb, "smb://%s/%s/Apps and Emulators/PS5/%s", c->host, STORE_PKG_SHARE, path);
-        sb_puts(&j, "{\"path\":"); sb_js(&j, smb); sb_puts(&j, "}");
-        int st = pm_http("POST", "/api/install", j.b ? j.b : "{}", &b);
-        logf_("store: pkg %s -> PKG Manager HTTP %d", smb, st);
-        if (st == 200 && b.b && strstr(b.b, "\"success\":true")) store_set("done", "PKG Manager is installing it (Install tab shows the progress)");
-        else store_set("failed", "PKG Manager: %s", st < 0 ? "not running on this console" : b.b ? b.b : "refused");
-        free(j.b); free(b.b); free(c); return NULL;
+    if (!strcmp(kind, "pkg")) {                                   // v2.10: BlazingMount's own installer (bm_install.c; PKG Manager is its fallback)
+        sb_t b = { 0 }; char rel[700]; snprintf(rel, sizeof rel, "Apps and Emulators/PS5/%s", path);
+        int st = inst_begin_shelf(rel, name[0] ? name : NULL, &b);
+        logf_("store: pkg %s -> install job HTTP %d", rel, st);
+        if (st == 200) store_set("done", "installing it (Install tab shows the progress)");
+        else store_set("failed", "%s", b.b ? b.b : "refused");
+        free(b.b); free(c); return NULL;
     }
     if (!strcmp(kind, "payload")) {
         const char *file = strrchr(path, '/'); file = file ? file + 1 : path;

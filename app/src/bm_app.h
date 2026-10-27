@@ -363,6 +363,15 @@ class App {
       else if (!ok || !v["ok"].truthy()) Toast("Not installed: " + v["error"].str());
       else Toast("Installing from your drives: you can keep using the console");
       nextStore_ = 0;
+    } else if (Base(path) == "/api/install" && v["state"].ok()) {   // 0.7: BlazingMount's own installer (payload 2.10 /api/install)
+      instHave_ = code == 200;
+      if (ok) inst_ = std::move(v);
+    } else if (Base(path) == "/api/install" || Base(path) == "/api/install/cancel") {
+      const bool cancel = Base(path) == "/api/install/cancel";
+      if (code == 0) Toast("BlazingMount did not answer");
+      else if (!ok || !v["ok"].truthy()) Toast((cancel ? "Not cancelled: " : "Not installed: ") + v["error"].str());
+      else Toast(cancel ? "Install cancelled" : "Installing: the PS5 reads it straight from your drives (no copy first)");
+      nextInst_ = 0;
     } else if (Base(path) == "/api/pm/status") {
       if (ok) pmStatus_ = std::move(v);
     } else if (Base(path) == "/api/pm/queue") {
@@ -423,7 +432,7 @@ class App {
     }
     if (connected_ && tab_ == Tab::kDiscover) RequestCoversOf(now, dItems_, dView_, dSel_, dTop_, true, "dsheet");
     // INSTALL: PKG Manager's drives + packages (slow), its status + queue every second while the tab is open or a job runs
-    if (connected_ && (tab_ == Tab::kInstall || PmBusy())) {
+    if (connected_ && (tab_ == Tab::kInstall || PmBusy() || InstBusy())) {
       if (now >= nextPmList_ && !Inflight("/api/pm/drives")) { Ask("GET", "/api/pm/drives"); nextPmList_ = now + 15.0; nextPkgs_ = 0; }
       if (tab_ == Tab::kInstall && storeOn_ && now >= nextStore_ && !Inflight("/api/store")) {
         Ask("GET", "/api/store"); nextStore_ = now + (storeJob_["state"].str() == "running" ? 1.0 : 10.0);
@@ -432,6 +441,7 @@ class App {
         Ask("GET", "/api/pm/packages?drive=" + pmDrives_[size_t(pmDrive_)].id); nextPkgs_ = now + 20.0;
       }
       if (now >= nextPm_ && !Inflight("/api/pm/status") && !Inflight("/api/pm/queue")) { Ask("GET", "/api/pm/status"); Ask("GET", "/api/pm/queue"); nextPm_ = now + 1.0; }
+      if (now >= nextInst_ && !Inflight("/api/install")) { Ask("GET", "/api/install"); nextInst_ = now + 1.0; }
     }
     if (connected_ && tab_ == Tab::kActivity && now >= nextLog_ && !Inflight("/api/log")) { Ask("GET", "/api/log?lines=80"); nextLog_ = now + 2.0; }
   }
@@ -494,7 +504,10 @@ class App {
   struct PmPkg { std::string path, title, tid, version, type, installedVersion, why; long long size = 0; int parts = 0; bool installed = false, canInstall = true; };
   std::vector<PmDrive> pmDrives_;
   std::vector<PmPkg> pm_;
-  json::Value pmStatus_, pmQueue_;
+  json::Value pmStatus_, pmQueue_, inst_;
+  bool instHave_ = false;                                         // the payload has /api/install (2.10+)
+  double nextInst_ = 0;
+  std::string instName_;
   std::string pmFor_;
   int pmDrive_ = 0, pmSel_ = 0, pmTop_ = 0;
   // ---- STORE (0.6.1): the homebrew in "Apps and Emulators/PS5" on the drives (payload /api/store); the first source of the tab
@@ -754,12 +767,23 @@ class App {
   }
   void PressConfirm(Button b) {
     if (b == kCross && confirm_.action == "store_install") { Ask("POST", "/api/store/install?" + confirm_.tid); confirm_.active = false; return; }
-    if (b == kCross && confirm_.action == "pm_install") { Ask("POST", "/api/pm/install?path=" + PathEnc(confirm_.tid)); confirm_.active = false; return; }
+    if (b == kCross && confirm_.action == "pm_install") {
+      const std::string rel = instHave_ ? ShelfPath(confirm_.tid) : std::string();
+      if (!rel.empty()) Ask("POST", "/api/install?path=" + PathEnc(rel) + "&name=" + PathEnc(instName_));   // payload falls back to PKG Manager itself
+      else Ask("POST", "/api/pm/install?path=" + PathEnc(confirm_.tid));
+      confirm_.active = false; return;
+    }
     if (b == kCross) { Act(confirm_.action, confirm_.tid); Toast(confirm_.yes + ": queued"); confirm_.active = false; }
     if (b == kSquare && !confirm_.altAction.empty()) { Act(confirm_.altAction, confirm_.tid); Toast(confirm_.alt + ": queued"); confirm_.active = false; }
     if (b == kCircle) confirm_.active = false;
   }
   bool PmBusy() const { return pmStatus_["is_installing"].truthy() || pmQueue_["active_id"].ll() > 0; }
+  bool InstBusy() const { const std::string st = inst_["state"].str(); return st == "starting" || st == "installing"; }
+  // a PKG on the 8TB (PKG Manager lists it as smb://<host>/mac1-8TB/<path>) -> BlazingMount's own installer reads it from imgserve
+  std::string ShelfPath(const std::string& smb) const {
+    const std::string pre = "smb://" + status_["host"].str() + "/mac1-8TB/";
+    return smb.rfind(pre, 0) == 0 ? smb.substr(pre.size()) : std::string();
+  }
   static std::string PathEnc(const std::string& s) {           // a query value: everything but unreserved characters %-encoded
     static const char* hx = "0123456789ABCDEF"; std::string o;
     for (unsigned char ch : s) {
@@ -787,11 +811,13 @@ class App {
     if (b == kUp && n) pmSel_ = (pmSel_ + n - 1) % n;
     if (b == kDown && n) pmSel_ = (pmSel_ + 1) % n;
     if (b == kTriangle) Ask("POST", "/api/pm/refresh");
-    if (b == kSquare && PmBusy()) Ask("POST", "/api/pm/cancel?id=" + std::to_string(pmQueue_["active_id"].ll()));
+    if (b == kSquare && InstBusy()) Ask("POST", "/api/install/cancel");
+    else if (b == kSquare && PmBusy()) Ask("POST", "/api/pm/cancel?id=" + std::to_string(pmQueue_["active_id"].ll()));
     if (b == kCross && pmSel_ < n) {
       const PmPkg& k = pm_[size_t(pmSel_)];
       if (!k.canInstall) { Toast("Can't install: " + (k.why.empty() ? std::string("PKG Manager says no") : k.why)); return; }
-      if (PmBusy()) { Toast("One install at a time: wait for this one, or {SQUARE} to cancel it"); return; }
+      if (PmBusy() || InstBusy()) { Toast("One install at a time: wait for this one, or {SQUARE} to cancel it"); return; }
+      instName_ = k.title;
       const json::Value& fm = status_["free_mb"];
       std::string body = (k.type.empty() ? std::string("Game") : k.type == "base" ? std::string("Game") : k.type == "update" ? std::string("Update") : k.type == "dlc" ? std::string("Add-on") : k.type) +
                          " " + k.version + ", " + Gb(k.size) + (k.parts > 1 ? " in " + std::to_string(k.parts) + " parts" : "") +
@@ -904,7 +930,27 @@ class App {
     b.Text(x0 + 32, 168, "NOW", St(kMeta, c::kTextDim));
     const json::Value& s = pmStatus_;
     float y = 210;
-    if (PmBusy()) {
+    if (InstBusy()) {                                              // BlazingMount's own installer: Sony's numbers, the payload's rate + ETA
+      const json::Value& j = inst_;
+      y = Wrap(b, x0 + 32, y, x1 - x0 - 64, j["name"].str().empty() ? j["title_id"].str() : j["name"].str(), St(kHead - 4, c::kTextHi), 2, 48) + 12;
+      const long long done = j["done"].ll(), total = j["total"].ll();
+      const double pct = std::clamp(j["progress"].num(), 0.0, 100.0);
+      Round(b, x0 + 32, y, x1 - 32, y + 20, 10, c::kSurfaceHi);
+      if (pct > 0) Round(b, x0 + 32, y, x0 + 32 + (x1 - x0 - 64) * float(pct / 100.0), y + 20, 10, c::kAccent);
+      y += 44;
+      char t[200];
+      std::snprintf(t, sizeof t, "%.0f%%   %s of %s", pct, Gb(done).c_str(), Gb(total).c_str());
+      b.Text(x0 + 32, y, t, St(kBody, c::kTextHi)); y += 44;
+      const long long rate = j["rate"].ll(), eta = j["eta"].ll(-1);
+      if (rate > 0 || eta >= 0) {
+        if (eta >= 0) std::snprintf(t, sizeof t, "%.1f MB/s   \xC2\xB7   %s left", rate / 1e6, eta >= 120 ? (std::to_string(eta / 60) + " min").c_str() : (std::to_string(eta) + " s").c_str());
+        else std::snprintf(t, sizeof t, "%.1f MB/s", rate / 1e6);
+        b.Text(x0 + 32, y, t, St(kMeta, c::kText, -0.03f)); y += 40;
+      }
+      const std::string ss = j["sony_status"].str();
+      b.Text(x0 + 32, y, Fit(b, (j["via"].str() == "pkgmanager" ? std::string("through PKG Manager") : "PS5: " + (ss.empty() ? std::string("starting") : ss)), St(kMeta, c::kTextDim, -0.03f), x1 - x0 - 64).c_str(), St(kMeta, c::kTextDim, -0.03f)); y += 40;
+      b.Text(x0 + 32, y + 10, "{SQUARE} Cancel this install", St(kMeta, c::kTextHi)); y += 70;
+    } else if (PmBusy()) {
       y = Wrap(b, x0 + 32, y, x1 - x0 - 64, s["title_name"].str().empty() ? s["title_id"].str() : s["title_name"].str(), St(kHead - 4, c::kTextHi), 2, 48) + 12;
       const long long done = s["downloaded_bytes"].ll(), total = s["total_bytes"].ll();
       const double pct = std::clamp(s["progress"].num(), 0.0, 100.0);
@@ -928,6 +974,13 @@ class App {
       pmRateAt_ = 0; pmRate_ = 0;
     }
     b.Text(x0 + 32, y, "LATELY", St(kMeta, c::kTextDim)); y += 42;
+    {
+      const std::string st = inst_["state"].str();
+      if (st == "done" || st == "failed" || st == "cancelled") {
+        std::string line = inst_["name"].str() + ": " + (st == "done" ? std::string("installed") : st == "cancelled" ? std::string("cancelled") : "failed - " + inst_["error"].str());
+        y = Wrap(b, x0 + 32, y, x1 - x0 - 64, line, St(kMeta - 2, st == "failed" ? c::kAccent : c::kText, -0.03f), 2, 32) + 10;
+      }
+    }
     const json::Value& jobs = pmQueue_["jobs"];
     for (size_t i = jobs.size(); i-- > 0 && y < kBottom - 120;) {
       const json::Value& j = jobs[i];
