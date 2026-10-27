@@ -340,8 +340,8 @@ class App {
       pmFor_ = QueryArg(path, "drive");
     } else if (Base(path) == "/api/store") {
       storeTried_ = true;
-      if (!ok) { storeMissing_ = code == 404 || code == 0; return; }
-      storeMissing_ = false;
+      if (!ok) { storeMissing_ = code == 404; storeWait_ = code != 404; if (storeWait_) nextStore_ = 0; return; }   // no answer yet (the payload asks the host: up to 15 s) = ask again, not "old payload"
+      storeMissing_ = false; storeWait_ = false;
       storeJob_ = v["job"];
       std::vector<std::string> folders, slots;
       for (const auto& f : v["have"]["folders"].items) folders.push_back(f.str());
@@ -501,7 +501,7 @@ class App {
   struct StoreItem { std::string kind, path, name, tid, version; long long size = 0; int files = 0; bool installed = false; };
   std::vector<StoreItem> store_;
   json::Value storeJob_;
-  bool storeOn_ = true, storeTried_ = false, storeMissing_ = false;
+  bool storeOn_ = true, storeTried_ = false, storeMissing_ = false, storeWait_ = false;
   int stSel_ = 0, stTop_ = 0;
   double nextStore_ = 0;
   bool pmTried_ = false, pmDown_ = false, pmPicked_ = false;
@@ -821,12 +821,12 @@ class App {
   }
   void DrawStore(Batch& b, float listR) {
     std::string head = storeMissing_ ? std::string("The store needs BlazingMount 2.9 on this console and imgserve on the drives")
-                     : !storeTried_ ? std::string("Looking at your drives...")
+                     : !storeTried_ || (storeWait_ && store_.empty()) ? std::string("Looking at your drives...")
                      : "Store  \xC2\xB7  Apps and Emulators on your drives  \xC2\xB7  " + std::to_string(store_.size()) + " items";
     b.Text(kGutter, 140, Fit(b, head, St(kBody, c::kTextHi), listR - kGutter - 200).c_str(), St(kBody, c::kTextHi));
     b.Text(listR, 144, "{L2} {R2} source", St(kMeta, c::kTextDim), Align::kRight);
     const float top = 200, rowH = 88, gap = 8; const int vis = 8;
-    if (store_.empty() && storeTried_) b.Text(kGutter, top + 20, "Nothing in Apps and Emulators/PS5 yet.", St(kMeta, c::kTextDim));
+    if (store_.empty() && storeTried_ && !storeWait_) b.Text(kGutter, top + 20, "Nothing in Apps and Emulators/PS5 yet.", St(kMeta, c::kTextDim));
     stTop_ = std::clamp(stTop_, std::max(0, stSel_ - vis + 1), stSel_);
     for (int i = 0; i < vis && stTop_ + i < int(store_.size()); ++i) {
       const int idx = stTop_ + i; const StoreItem& it = store_[size_t(idx)]; const bool f = idx == stSel_;
