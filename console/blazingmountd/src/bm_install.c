@@ -231,6 +231,7 @@ static void *inst_conn(void *arg) {
         size_t hl = (size_t)(e + 4 - req);
         char method[8] = "", target[300] = ""; unsigned id = 0;
         sscanf(req, "%7s %299s", method, target);
+        { char *qm = strchr(target, '?'); if (qm) *qm = 0; }        // Sony adds ?product=0284&serverIpAddr=127.0.0.1&r=00000000
         int keep = !strcasestr(req, "\nConnection: close") && strstr(req, "HTTP/1.1");
         char *rg = strcasestr(req, "\nRange: bytes=");
         long long a = 0, b = -1;

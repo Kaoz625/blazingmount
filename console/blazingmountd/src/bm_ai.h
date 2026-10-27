@@ -120,7 +120,7 @@ static struct { char uri[256], status[16], cid[48]; long long got, total; int er
 static pthread_mutex_t g_fake_mu = PTHREAD_MUTEX_INITIALIZER;
 static int fake_wr(int s, const char *b, size_t n) { while (n) { ssize_t w = write(s, b, n); if (w <= 0) return -1; b += w; n -= (size_t)w; } return 0; }
 static long long fake_range(int s, int port, const char *path, long long a, long long b, long long *total) {
-    char req[400]; int rl = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nRange: bytes=%lld-%lld\r\n\r\n", path, port, a, b);
+    char req[400]; int rl = snprintf(req, sizeof req, "GET %s?product=0284&serverIpAddr=127.0.0.1&r=00000000 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nRange: bytes=%lld-%lld\r\n\r\n", path, port, a, b);   // the query Sony's installer adds
     if (fake_wr(s, req, (size_t)rl)) return -1;
     char h[2048]; size_t have = 0; char *e = NULL;
     while (!e) { if (have >= sizeof h - 1) return -1; ssize_t n = read(s, h + have, sizeof h - 1 - have); if (n <= 0) return -1; have += (size_t)n; h[have] = 0; e = strstr(h, "\r\n\r\n"); }
