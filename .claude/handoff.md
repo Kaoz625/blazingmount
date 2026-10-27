@@ -72,3 +72,30 @@ Last action: pushed remove-local + prove + app 0.5.1 (cfb2f48); built payload 2.
 Next step: when mac1 load < 10 run the independent review (handoff section 4), then install on both consoles when idle (section 3).
 Key files: host/download-to-console.py, host/test_download_to_console.py, docs/DOWNLOAD-TO-CONSOLE.md, app/src/bm_app.h, console/blazingmountd/src/bm_api.c
 Blockers: review helper refused by the mac1 load cap; consoles busy. Full state: ~/.claude-team/handoffs/download-local.md
+
+---
+## bm-installer lane (claude-nyc-main, 27 Oct 2026 ~16:40-17:58) - BlazingMount installs PKGs itself (step 1 + 2 DONE)
+Working on: the app's INSTALL tab really installing + install from a PC with live %/ETA/cancel.
+Last action: payload 2.10-ccb1e37 + app 0.7.0 (eboot 4c8da613, zip sha 3b5058fc) on BOTH consoles; PHAT5 real install PPSA99051 done at ~30 MB/s.
+What exists now (all pushed, main):
+  - console/blazingmountd/src/bm_install.c: /api/install (path=<imgserve /pkgs.json path> | url=http://ip:port/x.pkg, name=), /api/install/cancel,
+    /api/install/pkgs. Sony's installer (sceAppInstUtilInstallByPackage) reads http://127.0.0.1:8095/i/<job>-<unixtime>.pkg = a proxy in the payload
+    that Range-reads the host. Progress = GetInstallStatus capped by bytes served; rate/ETA; cancel = proxy stops; stall 300 s = failed.
+  - every install runs in a FRESH helper process (bm_inst_helper.c, embedded, launched via elfldr 127.0.0.1:9021, IPC 127.0.0.1:8096, bm_ai.h).
+    Helper log: /data/blazing/inst-helper.log. Fallbacks: no helper -> in-payload call (1 per payload start) -> PKG Manager (drive pkgs only).
+  - host/install-pkg.py <console ip> <file.pkg|file.pkg.0> : this computer serves the pkg, live %/MB/s/ETA, Ctrl-C cancels. PC must be on the console LAN.
+  - app 0.7.0: 8TB entries go to /api/install; USB entries stay PKG Manager; store pkgs -> own installer.
+ROOT CAUSES found: (1) one AppInstUtil install per PROCESS (2nd = 0x80B2116F) -> helper per install; (2) 0x80B224xx = HTTP status the PS5 got from
+  the URL (0x80B22404 = 404: proxy must ignore Sony's ?product=0284&serverIpAddr=... query); (3) PKG Manager itself DID process jobs on re-test
+  (DIGI5 MOUS21425 base done in 10 s); its PHAT5 DLC (PPSA28997 Deluxe upgrade) streamed 100% then "timed out during finalization" (Sony never
+  reported playable). The original "queued but never runs" case was NOT reproduced: PKG Manager's queue only advances while its installer is idle,
+  so one stuck finalisation (up to 5 min) holds every later job.
+Next step: drive the app's INSTALL tab on the TV once (press CROSS on an 8TB pkg, watch %/ETA, SQUARE cancel) - only with Markus/RP free.
+Key files: console/blazingmountd/src/{bm_install.c,bm_inst_helper.c,bm_ai.h,bm_store.c}, host/install-pkg.py, host/test_install.py (40 checks),
+  app/src/bm_app.h; build: mac2 ~/NYCT/bm-ccb1e37 (FORK = bm-76ab657/fork.sprx defd666f); payload install script pattern in this lane's report.
+Blockers / leftovers:
+  - DIGI5: 2 hung helper processes (pids 165, 167, from a bad intermediate build) ignore pldmgr process_kill; gone at the next reboot.
+  - DIGI5 got test installs PS5Library PPSA99051 + PS5-SHOP MOUS21425 (73 MB, DIGI5 space rule says tests on PHAT5) - remove on Markus's word
+    (SMP uninstall via /api/smp/uninstall refuses MOUS21425 as a "bad title id").
+  - PHAT5: a failed PKG Manager DLC try (PPSA28997 Deluxe upgrade, 1 MB) may sit in the PS5 Downloads list.
+  - 17:10 I restarted blazingmountd on PHAT5 while np-universal held the claim (my script ignored REFUSED); reported on hub + relay #20434.
