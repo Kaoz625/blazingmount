@@ -46,7 +46,8 @@ fi
 : "${PS5_PAYLOAD_SDK:?set PS5_PAYLOAD_SDK to your ps5-payload-sdk checkout (or HOST=1 for the test build)}"
 CC="${CC:-${PS5_PAYLOAD_SDK}/bin/prospero-clang}"
 # v2.10: the one-install helper (bm_inst_helper.c, see bm_ai.h) is built first and embedded: blazingmountd hands it to elfldr per install
-"$CC" -O2 -Wall -Wextra -std=gnu11 -o "$HERE/out/bm_inst_helper.elf" "$HERE/src/bm_inst_helper.c" -lkernel_sys
+"$CC" -O2 -Wall -Wextra -std=gnu11 -DBM_AI_LINKED -o "$HERE/out/bm_inst_helper.elf" "$HERE/src/bm_inst_helper.c" -lkernel_sys \
+  -lSceNetCtl -lSceUserService -lSceSystemService -lSceAppInstUtil -lSceNet
 python3 -I - "$HERE/out/bm_inst_helper.elf" "$HERE/out/inst_helper_blob.h" <<'EOF2'
 import hashlib, sys
 data = open(sys.argv[1], "rb").read()

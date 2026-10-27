@@ -47,7 +47,27 @@ static int g_ai_pre[3];
 #define AI_TRACE(step) ((void)0)
 #endif                    // NetCtl / UserService / Net init results (the helper logs them)
 
-#ifdef __PROSPERO__
+#if defined(__PROSPERO__) && defined(BM_AI_LINKED)
+// the helper ELF: linked against Sony's libraries the way PKG Manager's helper is (-lSceNetCtl -lSceUserService -lSceSystemService
+// -lSceAppInstUtil -lSceNet), so the modules come up at process start. DIGI5 27 Oct: the same helper resolving them at run time
+// (sysmodule loader + dlsym) initialised fine but every InstallByPackage answered 0x80B22404.
+int sceNetCtlInit(void); int sceUserServiceInitialize(int *); int sceNetInit(void);
+int sceAppInstUtilInitialize(void); int sceAppInstUtilTerminate(void);
+int sceAppInstUtilInstallByPackage(ai_meta_t *, ai_pkg_info_t *, ai_playgo_t *);
+int sceAppInstUtilGetInstallStatus(const char *, ai_status_t *);
+static int ai_bring_up(void) {
+    int prio = 256;
+    g_ai_pre[0] = sceNetCtlInit(); AI_TRACE("netctl");
+    g_ai_pre[1] = sceUserServiceInitialize(&prio); AI_TRACE("userservice");
+    g_ai_pre[2] = sceNetInit(); AI_TRACE("net");
+    ai_init = sceAppInstUtilInitialize; ai_term = sceAppInstUtilTerminate;
+    ai_by_package = sceAppInstUtilInstallByPackage; ai_get_status = sceAppInstUtilGetInstallStatus;
+    int rc = ai_init();
+    AI_TRACE("initialized");
+    if (rc) { snprintf(g_ai_why, sizeof g_ai_why, "sceAppInstUtilInitialize 0x%08x", (unsigned)rc); return -1; }
+    return 0;
+}
+#elif defined(__PROSPERO__)
 #include <ps5/kernel.h>
 int sceKernelLoadStartModule(const char *, size_t, const void *, uint32_t, void *, int *);
 static intptr_t ai_sym(const char *module, const char *sym) {   // the module's symbol, loading it from /system/common/lib when absent
