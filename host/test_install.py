@@ -233,6 +233,26 @@ def main():
         j = wait(api4, t=20)
         check(j.get("state") == "failed" and "nothing moved" in j.get("error", "") and "downloading" in j.get("error", ""), "6. stalled -> failed: %s" % j.get("error"))
 
+        # 8: host/install-pkg.py - this computer serves a (split) pkg, the console installs it, live progress; Ctrl-C cancels
+        tool = os.path.join(HERE, "install-pkg.py")
+        half = len(PKG) // 2
+        open(os.path.join(tmp, "Split Game.pkg.0"), "wb").write(PKG[:half]); open(os.path.join(tmp, "Split Game.pkg.1"), "wb").write(PKG[half:])
+        aport = int(api.rsplit(":", 1)[1])
+        r = subprocess.run([sys.executable, "-I", tool, "127.0.0.1", os.path.join(tmp, "Split Game.pkg.0"), "--bind", "127.0.0.1",
+                            "--api-port", str(aport), "--name", "Split Game"], capture_output=True, text=True, timeout=60)
+        j = call(api, "GET", "/api/install")[1]
+        check(r.returncode == 0 and "installed" in r.stdout and j.get("served") == len(PKG) and j.get("name") == "Split Game",
+              "8. install-pkg.py: a split set served as one file, installed (exit %d, %s bytes)" % (r.returncode, j.get("served")))
+        check("ETA" in r.stdout and "%" in r.stdout, "8. install-pkg.py shows %/speed/ETA")
+        aport2 = int(api2.rsplit(":", 1)[1])
+        pr = subprocess.Popen([sys.executable, "-I", tool, "127.0.0.1", os.path.join(tmp, "Split Game.pkg.0"), "--bind", "127.0.0.1",
+                               "--api-port", str(aport2)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        time.sleep(2.5)
+        import signal as _sig
+        pr.send_signal(_sig.SIGINT)
+        out, _ = pr.communicate(timeout=30)
+        check(pr.returncode == 2 and "cancelled" in out, "8. install-pkg.py Ctrl-C -> the install is cancelled (exit %s)" % pr.returncode)
+
         # 7: the installer installs ONE package per process (Sony: 0x80B2116F after that). With the helper every install gets a fresh
         # process (1 + 2 above ran on one payload); without one, the 2nd install in the payload falls back to PKG Manager.
         p5, api5, _, log5 = start(tmp, img_port, pm_port, "on", helper=False); procs.append(p5)
