@@ -23,9 +23,6 @@
 // its ARCHITECTURE.md); the code here is ours. Host test builds (no __PROSPERO__) get a FAKE installer that reads the URL the way Sony's
 // does (host/test_install.py), so every route, the proxy, progress and cancel run in the tests.
 
-#ifndef BM_INST_PORT
-#define BM_INST_PORT 8095
-#endif
 #ifndef INST_STALL_S
 #define INST_STALL_S 300                  // nothing moved for this long (bytes, Sony's status) -> failed, like PKG Manager's 5 min
 #endif
@@ -60,120 +57,106 @@ static void inst_set(const char *state, const char *fmt, ...) {
     pthread_mutex_unlock(&g_inst_mu);
 }
 
-// ---------------------------------------------------------------- Sony's installer (AppInstUtil)
-typedef struct { char content_id[48]; int type, platform; } ai_pkg_info_t;
-typedef struct { const char *uri, *ex_uri, *playgo_scenario_id, *content_id, *content_name, *icon_url; } ai_meta_t;
-typedef struct { char languages[30][8]; char playgo_scenario_ids[64][3]; char content_ids[64][48]; unsigned char unknown[6480]; } ai_playgo_t;
-typedef struct { int32_t error_code, version; char description[512]; char type[9]; } ai_err_t;
-typedef struct {
-    char status[16]; char src_type[8]; uint32_t remain_time;
-    uint64_t downloaded_size, initial_chunk_size, total_size; uint32_t promote_progress;
-    ai_err_t error_info; int32_t local_copy_percent; int8_t is_copy_only;
-    char pad[2048];                       // whatever newer firmware appends
-} ai_status_t;
-#define AI_INVALID_SLOT 0x80B2116Fu       // PLAYGO_ERROR_CORE_INVALID_SLOT: the 2nd install of one AppInstUtil session (FW >= 9.60)
-
-static int (*ai_init)(void), (*ai_term)(void);
-static int (*ai_by_package)(ai_meta_t *, ai_pkg_info_t *, ai_playgo_t *);
-static int (*ai_get_status)(const char *, ai_status_t *);
-static int g_ai_state;                    // 0 not tried, 1 ready, -1 unavailable (then PKG Manager)
-static char g_ai_why[160];
-
-#ifdef __PROSPERO__
-int sceKernelLoadStartModule(const char *, size_t, const void *, uint32_t, void *, int *);
-static intptr_t ai_sym(const char *module, const char *sym) {   // the module's symbol, loading it from /system/common/lib when absent
-    uint32_t h = 0;
-    if (kernel_dynlib_handle(-1, module, &h) < 0) {
-        char path[128]; snprintf(path, sizeof path, "/system/common/lib/%s", module);
-        int rc = sceKernelLoadStartModule(path, 0, NULL, 0, NULL, NULL);
-        if (rc > 0) h = (uint32_t)rc;
-        else if (kernel_dynlib_handle(-1, module, &h) < 0) return 0;
-    }
-    return kernel_dynlib_dlsym(-1, h, sym);
-}
-static int ai_bring_up(void) {
-    int (*sysmod)(unsigned) = (int (*)(unsigned))ai_sym("libSceSysmodule.sprx", "sceSysmoduleLoadModuleInternal");
-    if (sysmod) { sysmod(0x8000001d); sysmod(0x80000011); sysmod(0x80000010); sysmod(0x80000014); }   // IPMI, UserService, SystemService, AppInstUtil
-    ai_init = (int (*)(void))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilInitialize");
-    ai_term = (int (*)(void))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilTerminate");
-    ai_by_package = (int (*)(ai_meta_t *, ai_pkg_info_t *, ai_playgo_t *))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilInstallByPackage");
-    ai_get_status = (int (*)(const char *, ai_status_t *))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilGetInstallStatus");
-    if (!ai_init || !ai_by_package || !ai_get_status) { snprintf(g_ai_why, sizeof g_ai_why, "libSceAppInstUtil symbols not found"); return -1; }
-    int rc = ai_init();
-    if (rc) { snprintf(g_ai_why, sizeof g_ai_why, "sceAppInstUtilInitialize 0x%08x", (unsigned)rc); return -1; }
-    return 0;
-}
-#else
-// FAKE installer for the host tests: reads the URL like Sony's does (64 KiB header, then 1 MiB Range pieces on a keep-alive
-// connection), reports downloading -> playable. BM_FAKE_AI=off (unavailable), refuse (rc 0x80B21104), stall (never finishes),
-// BM_FAKE_AI_DELAY_MS between pieces (so a cancel lands mid-way).
-static struct { char uri[200], status[16], cid[48]; long long got, total; int err, running; } g_fake;
-static pthread_mutex_t g_fake_mu = PTHREAD_MUTEX_INITIALIZER;
-static long long fake_range(int s, int port, const char *path, long long a, long long b, long long *total) {
-    char req[400]; int rl = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nRange: bytes=%lld-%lld\r\n\r\n", path, port, a, b);
-    if (write_all(s, req, (size_t)rl)) return -1;
-    char h[2048]; size_t have = 0; char *e = NULL;
-    while (!e) { ssize_t n = read(s, h + have, sizeof h - 1 - have); if (n <= 0) return -1; have += (size_t)n; h[have] = 0; e = strstr(h, "\r\n\r\n"); }
-    if (atoi(h + 9) != 206) return -1;
-    char *cl = strcasestr(h, "\nContent-Length: "), *cr = strcasestr(h, "\nContent-Range: bytes ");
-    long long want = cl ? atoll(cl + 17) : -1, ra, rb; if (cr) sscanf(cr + 22, "%lld-%lld/%lld", &ra, &rb, total);
-    long long got = (long long)(have - (size_t)(e + 4 - h)); char buf[65536];
-    while (got < want) { ssize_t n = read(s, buf, sizeof buf); if (n <= 0) return -1; got += n; }
-    return got;
-}
-static void *fake_sony(void *arg) {
-    (void)arg;
-    int port = 0; char path[160] = "";
-    sscanf(g_fake.uri, "http://127.0.0.1:%d%159s", &port, path);
-    int delay = getenv("BM_FAKE_AI_DELAY_MS") ? atoi(getenv("BM_FAKE_AI_DELAY_MS")) : 0;
-    int s = connect_ms("127.0.0.1", port, 2000); long long total = -1;
-    long long n = s < 0 ? -1 : fake_range(s, port, path, 0, 65535, &total);
-    pthread_mutex_lock(&g_fake_mu); g_fake.total = total; g_fake.got = n > 0 ? n : 0; pthread_mutex_unlock(&g_fake_mu);
-    for (long long a = 65536; n > 0 && a < total; a += 1 << 20) {
-        if (delay) usleep((useconds_t)delay * 1000);
-        long long b = a + (1 << 20) - 1; if (b >= total) b = total - 1;
-        n = fake_range(s, port, path, a, b, &total);
-        if (n > 0) { pthread_mutex_lock(&g_fake_mu); g_fake.got += n; pthread_mutex_unlock(&g_fake_mu); }
-    }
-    if (s >= 0) close(s);
-    pthread_mutex_lock(&g_fake_mu);
-    const char *mode = getenv("BM_FAKE_AI") ? getenv("BM_FAKE_AI") : "";
-    if (n <= 0) { snprintf(g_fake.status, sizeof g_fake.status, "error"); g_fake.err = (int)0x80B2111Eu; }   // a read failed (a cancel)
-    else if (strcmp(mode, "stall")) snprintf(g_fake.status, sizeof g_fake.status, "playable");
-    g_fake.running = 0;
-    pthread_mutex_unlock(&g_fake_mu);
-    return NULL;
-}
-static int fake_init(void) { return 0; }
-static int fake_term(void) { return 0; }
-static int fake_by_package(ai_meta_t *m, ai_pkg_info_t *info, ai_playgo_t *pg) {
-    (void)pg;
-    const char *mode = getenv("BM_FAKE_AI") ? getenv("BM_FAKE_AI") : "";
-    if (!strcmp(mode, "refuse")) return (int)0x80B21104u;
-    pthread_mutex_lock(&g_fake_mu);
-    snprintf(g_fake.uri, sizeof g_fake.uri, "%s", m->uri); snprintf(g_fake.status, sizeof g_fake.status, "downloading");
-    snprintf(g_fake.cid, sizeof g_fake.cid, "IV9999-FAKE00001_00-BLAZINGMOUNTTEST"); g_fake.got = 0; g_fake.total = 0; g_fake.err = 0; g_fake.running = 1;
-    pthread_mutex_unlock(&g_fake_mu);
-    snprintf(info->content_id, sizeof info->content_id, "%s", g_fake.cid);
-    pthread_t t; if (pthread_create(&t, NULL, fake_sony, NULL)) return -1;
-    pthread_detach(t);
-    return 0;
-}
-static int fake_get_status(const char *cid, ai_status_t *st) {
-    (void)cid;
-    pthread_mutex_lock(&g_fake_mu);
-    snprintf(st->status, sizeof st->status, "%s", g_fake.status);
-    st->downloaded_size = (uint64_t)g_fake.got; st->total_size = (uint64_t)(g_fake.total > 0 ? g_fake.total : 0);
-    st->error_info.error_code = g_fake.err; st->remain_time = 7;
-    pthread_mutex_unlock(&g_fake_mu);
-    return 0;
-}
-static int ai_bring_up(void) {
-    if (getenv("BM_FAKE_AI") && !strcmp(getenv("BM_FAKE_AI"), "off")) { snprintf(g_ai_why, sizeof g_ai_why, "fake: unavailable"); return -1; }
-    ai_init = fake_init; ai_term = fake_term; ai_by_package = fake_by_package; ai_get_status = fake_get_status;
-    return 0;
-}
+// ---------------------------------------------------------------- Sony's installer: a fresh helper process per install (bm_ai.h)
+#include "bm_ai.h"
+#if defined(__has_include)
+#if __has_include("inst_helper_blob.h")
+#include "inst_helper_blob.h"         // generated by build.sh: bm_inst_helper[], bm_inst_helper_len (the helper ELF)
+#define BM_HAVE_HELPER 1
 #endif
+#endif
+#ifndef BM_HAVE_HELPER
+static const unsigned long bm_inst_helper_len = 0;
+static const unsigned char bm_inst_helper[1] = { 0 };
+#endif
+#ifndef BM_ELFLDR_PORT
+#define BM_ELFLDR_PORT 9021
+#endif
+#include <sys/wait.h>
+
+typedef struct { int ipc, elf, inproc; pid_t pid; } be_t;           // one install's link to Sony's installer
+static int g_ai_state;                    // in-process fallback: 0 not tried, 1 ready, -1 unavailable
+static int g_ipc_ls = -1;
+static char g_be_why[200];
+
+static int be_listen(void) {                                       // 127.0.0.1:BM_INST_IPC, once
+    if (g_ipc_ls >= 0) return 0;
+    int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a; memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons(BM_INST_IPC); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (ls < 0 || bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 2)) { if (ls >= 0) close(ls); return -1; }
+    g_ipc_ls = ls;
+    return 0;
+}
+// start a helper and take its call-back connection; 0 = b->ipc is live
+static int be_launch(be_t *b) {
+    b->ipc = b->elf = -1; b->inproc = 0; b->pid = 0;
+    if (be_listen()) { snprintf(g_be_why, sizeof g_be_why, "IPC port %d busy", BM_INST_IPC); return -1; }
+    for (;;) {                                                     // a stale call-back from an earlier helper
+        struct pollfd pf = { g_ipc_ls, POLLIN, 0 };
+        if (poll(&pf, 1, 0) != 1) break;
+        int o = accept(g_ipc_ls, NULL, NULL); if (o >= 0) close(o); else break;
+    }
+#ifdef __PROSPERO__
+    if (!bm_inst_helper_len) { snprintf(g_be_why, sizeof g_be_why, "no helper built in"); return -1; }
+    int e = connect_ms("127.0.0.1", BM_ELFLDR_PORT, 2000);
+    if (e < 0) { snprintf(g_be_why, sizeof g_be_why, "elfldr 127.0.0.1:%d not answering", BM_ELFLDR_PORT); return -1; }
+    if (write_all(e, bm_inst_helper, bm_inst_helper_len)) { close(e); snprintf(g_be_why, sizeof g_be_why, "elfldr took no helper"); return -1; }
+    shutdown(e, SHUT_WR);                                          // elfldr keeps this socket as the helper's stdio: kept open
+    b->elf = e;
+#else
+    const char *hp = getenv("BM_INST_HELPER");
+    if (!hp) { snprintf(g_be_why, sizeof g_be_why, "no helper (BM_INST_HELPER)"); return -1; }
+    pid_t pid = fork();
+    if (pid == 0) { execl(hp, hp, (char *)NULL); _exit(127); }
+    if (pid < 0) { snprintf(g_be_why, sizeof g_be_why, "fork failed"); return -1; }
+    b->pid = pid;
+#endif
+    struct pollfd pf = { g_ipc_ls, POLLIN, 0 };
+    if (poll(&pf, 1, 15000) != 1) { snprintf(g_be_why, sizeof g_be_why, "the helper did not call back in 15 s"); if (b->elf >= 0) close(b->elf); b->elf = -1; return -1; }
+    b->ipc = accept(g_ipc_ls, NULL, NULL);
+    if (b->ipc < 0) { snprintf(g_be_why, sizeof g_be_why, "accept failed"); if (b->elf >= 0) close(b->elf); b->elf = -1; return -1; }
+    struct timeval tv = { 30, 0 };
+    setsockopt(b->ipc, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(b->ipc, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    return 0;
+}
+static int be_rd(int s, void *p, size_t n) { char *q = p; while (n) { ssize_t r = read(s, q, n); if (r <= 0) return -1; q += r; n -= (size_t)r; } return 0; }
+static int be_call(be_t *b, int op, const char *uri, const char *name, const char *cid, ih_resp_t *r) {   // 0 = answered
+    memset(r, 0, sizeof *r);
+    if (b->inproc) {
+        r->magic = IH_MAGIC;
+        if (op == IH_INSTALL) { r->rc = ai_install_uri(uri, name, r->cid, sizeof r->cid); return 0; }
+        ai_status_t *st = calloc(1, sizeof(ai_status_t));
+        if (!st) return -1;
+        r->rc = ai_get_status(cid, st);
+        snprintf(r->status, sizeof r->status, "%.15s", st->status);
+        r->downloaded = st->downloaded_size; r->total = st->total_size; r->remain = st->remain_time; r->error = st->error_info.error_code;
+        free(st);
+        return 0;
+    }
+    ih_req_t q; memset(&q, 0, sizeof q); q.magic = IH_MAGIC; q.op = (uint32_t)op;
+    snprintf(q.uri, sizeof q.uri, "%s", uri ? uri : ""); snprintf(q.name, sizeof q.name, "%s", name ? name : ""); snprintf(q.cid, sizeof q.cid, "%s", cid ? cid : "");
+    if (write_all(b->ipc, &q, sizeof q) || be_rd(b->ipc, r, sizeof *r) || r->magic != IH_MAGIC) return -1;
+    return 0;
+}
+static void be_close(be_t *b) {
+    if (b->ipc >= 0) { ih_req_t q; memset(&q, 0, sizeof q); q.magic = IH_MAGIC; q.op = IH_BYE; write_all(b->ipc, &q, sizeof q); close(b->ipc); }
+    if (b->elf >= 0) close(b->elf);
+#ifndef __PROSPERO__
+    if (b->pid > 0) for (int i = 0; i < 50 && waitpid(b->pid, NULL, WNOHANG) == 0; i++) usleep(100000);
+#endif
+    b->ipc = b->elf = -1; b->pid = 0;
+}
+// a helper, else (no elfldr / no helper) Sony's installer in THIS process - good for one install per payload start
+static int be_open(be_t *b) {
+    if (be_launch(b) == 0) return 0;
+    logf_("install: no helper process (%s): trying the installer in this payload", g_be_why);
+    if (g_ai_state == 0) { g_ai_state = ai_bring_up() == 0 ? 1 : -1; logf_("install: the installer in this payload: %s", g_ai_state == 1 ? "ready" : g_ai_why); }
+    if (g_ai_state != 1) { size_t L = strlen(g_be_why); snprintf(g_be_why + L, sizeof g_be_why - L, "; in-payload: %s", g_ai_why); return -1; }
+    b->inproc = 1;
+    return 0;
+}
 
 // ---------------------------------------------------------------- upstream: one Range read of the source
 static int inst_up_open(long long a, long long b, long long *total, char *pre, size_t *pre_n, char *why, size_t wn) {
@@ -363,13 +346,6 @@ static void inst_via_pm(const char *rel) {
 }
 
 // ---------------------------------------------------------------- the job
-static int ai_ready(void) {
-    if (g_ai_state == 0) {
-        g_ai_state = ai_bring_up() == 0 ? 1 : -1;
-        logf_("install: Sony's installer from this payload: %s", g_ai_state == 1 ? "ready" : g_ai_why);
-    }
-    return g_ai_state == 1;
-}
 static void *inst_run(void *arg) {
     (void)arg;
     char rel[900] = ""; unsigned id; int route;
@@ -384,60 +360,55 @@ static void *inst_run(void *arg) {
     close(s);
     pthread_mutex_lock(&g_inst_mu); g_inst.total = total; g_inst.moved = time(NULL); pthread_mutex_unlock(&g_inst_mu);
 
-    if (!ai_ready() || inst_listen_start() != 0) {
-        if (route) { logf_("install: %s -> PKG Manager", g_ai_state == 1 ? "proxy port busy" : g_ai_why); inst_via_pm(rel); }
-        else inst_set("failed", "Sony's installer is not reachable from this payload (%s)", g_ai_state == 1 ? "proxy port busy" : g_ai_why);
+    be_t be = { -1, -1, 0, 0 };
+    if (inst_listen_start() != 0) snprintf(g_be_why, sizeof g_be_why, "proxy port %d busy", BM_INST_PORT);
+    if (!g_inst_listening || be_open(&be) != 0) {
+        if (route) { logf_("install: %s -> PKG Manager", g_be_why); inst_via_pm(rel); }
+        else inst_set("failed", "Sony's installer is not reachable from this payload (%s)", g_be_why);
         return NULL;
     }
     char uri[120], name[200];
     snprintf(uri, sizeof uri, "http://127.0.0.1:%d/i/%u.pkg", BM_INST_PORT, id);
     pthread_mutex_lock(&g_inst_mu); snprintf(name, sizeof name, "%s", g_inst.name); snprintf(g_inst.via, sizeof g_inst.via, "sony"); pthread_mutex_unlock(&g_inst_mu);
     inst_set("installing", "handing it to the PS5 installer");
-    ai_meta_t m = { uri, "", "", "", name, "" };
-    ai_pkg_info_t info; ai_playgo_t *pg = calloc(1, sizeof *pg);
-    if (!pg) { inst_set("failed", "out of memory"); return NULL; }
-    int rc = 0;
-    for (int attempt = 0; attempt < 2; attempt++) {
-        memset(&info, 0, sizeof info); memset(pg, 0, sizeof *pg);
-        rc = ai_by_package(&m, &info, pg);
-        logf_("install: sceAppInstUtilInstallByPackage %s (%s) -> 0x%08x cid %s", uri, name, (unsigned)rc, info.content_id);
-        if ((unsigned)rc != AI_INVALID_SLOT || !ai_term) break;
-        ai_term(); if (ai_init()) break;                              // a fresh AppInstUtil session, then once more
-    }
-    free(pg);
+    ih_resp_t r;
+    int rc = be_call(&be, IH_INSTALL, uri, name, NULL, &r) ? -1 : r.rc;
+    logf_("install: sceAppInstUtilInstallByPackage %s (%s, %s) -> 0x%08x %s %s", uri, name, be.inproc ? "in this payload" : "helper process",
+          (unsigned)rc, r.status[0] ? r.status : "cid", r.cid);
     if (rc) {
+        be_close(&be);
         if (route) { logf_("install: the PS5 installer refused it (0x%08x) -> PKG Manager", (unsigned)rc); inst_via_pm(rel); }
         else inst_set("failed", "the PS5 installer refused it (0x%08x)", (unsigned)rc);
         return NULL;
     }
     pthread_mutex_lock(&g_inst_mu);
-    snprintf(g_inst.content_id, sizeof g_inst.content_id, "%.48s", info.content_id);
+    snprintf(g_inst.content_id, sizeof g_inst.content_id, "%.48s", r.cid);
     if (strlen(g_inst.content_id) >= 16) snprintf(g_inst.title_id, sizeof g_inst.title_id, "%.9s", g_inst.content_id + 7);
     pthread_mutex_unlock(&g_inst_mu);
     inst_set(NULL, "the PS5 is installing it");
 
-    ai_status_t *st = calloc(1, sizeof *st);
     long long prev = 0; time_t tprev = time(NULL); char last_status[20] = "";
     for (;;) {
         sleep(1);
         int cancel; char cid[64];
         pthread_mutex_lock(&g_inst_mu); cancel = g_inst.cancel; snprintf(cid, sizeof cid, "%s", g_inst.content_id); pthread_mutex_unlock(&g_inst_mu);
-        int grc = st ? (memset(st, 0, sizeof *st), ai_get_status(cid, st)) : -1;
+        ih_resp_t q; int grc = be_call(&be, IH_STATUS, NULL, NULL, cid, &q) ? -2 : q.rc;
+        if (grc == -2) { inst_set("failed", "the installer helper stopped answering"); break; }
         pthread_mutex_lock(&g_inst_mu);
         if (grc == 0) {
-            snprintf(g_inst.sony_status, sizeof g_inst.sony_status, "%.15s", st->status);
-            g_inst.sony_error = st->error_info.error_code; g_inst.remain = (int)st->remain_time;
+            snprintf(g_inst.sony_status, sizeof g_inst.sony_status, "%.15s", q.status);
+            g_inst.sony_error = q.error; g_inst.remain = (int)q.remain;
             if (strcmp(last_status, g_inst.sony_status)) { snprintf(last_status, sizeof last_status, "%s", g_inst.sony_status); g_inst.moved = time(NULL); }
         }
-        long long d = grc == 0 && st->downloaded_size ? (long long)st->downloaded_size : 0;
+        long long d = grc == 0 && q.downloaded ? (long long)q.downloaded : 0;
         if (d > g_inst.served) d = g_inst.served;                       // Sony counts what it asked for; never more than really arrived
         if (d < g_inst.done) d = g_inst.done;
         if (!d) d = g_inst.served < g_inst.total ? g_inst.served : g_inst.total;
         g_inst.done = d;
         time_t now = time(NULL);
         if (now > tprev) { long long r = (d - prev) / (now - tprev); g_inst.rate = g_inst.rate ? (g_inst.rate * 2 + r) / 3 : r; prev = d; tprev = now; }
-        int sony_done = grc == 0 && (!strcmp(st->status, "playable") || !strcmp(st->status, "completed"));
-        int sony_err = grc == 0 && st->error_info.error_code != 0;
+        int sony_done = grc == 0 && (!strcmp(q.status, "playable") || !strcmp(q.status, "completed"));
+        int sony_err = grc == 0 && q.error != 0;
         int stalled = now - g_inst.moved > INST_STALL_S;
         char sstat[20]; snprintf(sstat, sizeof sstat, "%s", g_inst.sony_status); int serr = g_inst.sony_error;
         pthread_mutex_unlock(&g_inst_mu);
@@ -446,7 +417,7 @@ static void *inst_run(void *arg) {
         if (sony_err) { inst_set("failed", "the PS5 installer: error 0x%08x (status %s)", (unsigned)serr, sstat); break; }
         if (stalled) { inst_set("failed", "nothing moved for %d s (PS5 status '%s') - check the PS5's Downloads", INST_STALL_S, sstat); break; }
     }
-    free(st);
+    be_close(&be);
     char fin[16], tid[16]; long long sv, tt;
     pthread_mutex_lock(&g_inst_mu); snprintf(fin, sizeof fin, "%s", g_inst.state); snprintf(tid, sizeof tid, "%s", g_inst.title_id);
     sv = g_inst.served; tt = g_inst.total; pthread_mutex_unlock(&g_inst_mu);
@@ -494,7 +465,7 @@ static void inst_status(sb_t *b) {
     sb_f(b, ",\"sony_error\":%d,\"step\":", g_inst.sony_error); sb_js(b, g_inst.step);
     sb_puts(b, ",\"error\":"); sb_js(b, g_inst.err);
     sb_f(b, ",\"started\":%lld,\"finished\":%lld,\"installer\":\"%s\"}", (long long)g_inst.started, (long long)g_inst.finished,
-         g_ai_state == 1 ? "ready" : g_ai_state < 0 ? "pkgmanager" : "not tried");
+         (bm_inst_helper_len || getenv("BM_INST_HELPER")) ? "helper" : g_ai_state == 1 ? "in-payload" : g_ai_state < 0 ? "pkgmanager" : "not tried");
     pthread_mutex_unlock(&g_inst_mu);
 }
 

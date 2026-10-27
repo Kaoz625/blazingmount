@@ -97,22 +97,25 @@ def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 
-def build(tmp, aport, iport, pport):
-    exe = os.path.join(tmp, "bmd-%d" % aport)
-    r = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-std=gnu11", '-DBM_VERSION="install-test"', "-DBM_API_PORT=%d" % aport,
-                        "-DBM_INST_PORT=%d" % iport, "-DBM_PM_PORT=%d" % pport, "-DINST_STALL_S=4", "-I" + OUT, "-o", exe,
-                        os.path.join(SRC, "blazingmountd.c"), "-lpthread"], capture_output=True, text=True)
-    if r.returncode or r.stderr.strip():
-        print(r.stderr); sys.exit("build failed or warned")
-    return exe
+def build(tmp, aport, iport, pport, ipc):
+    exe, helper = os.path.join(tmp, "bmd-%d" % aport), os.path.join(tmp, "helper-%d" % aport)
+    for out, src, extra in ((exe, "blazingmountd.c", ['-DBM_VERSION="install-test"', "-DBM_API_PORT=%d" % aport, "-DBM_PM_PORT=%d" % pport,
+                                                      "-DINST_STALL_S=4", "-I" + OUT]), (helper, "bm_inst_helper.c", [])):
+        r = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-std=gnu11", "-DBM_INST_PORT=%d" % iport, "-DBM_INST_IPC=%d" % ipc] + extra
+                           + ["-o", out, os.path.join(SRC, src), "-lpthread"], capture_output=True, text=True)
+        if r.returncode or r.stderr.strip():
+            print(r.stderr); sys.exit("build failed or warned: " + src)
+    return exe, helper
 
 
-def start(tmp, iport_img, pport, fake, delay=0):
-    aport, iport = free_port(), free_port()
-    exe = build(tmp, aport, iport, pport)
+def start(tmp, iport_img, pport, fake, delay=0, helper=True):
+    aport, iport, ipc = free_port(), free_port(), free_port()
+    exe, hexe = build(tmp, aport, iport, pport, ipc)
     root = os.path.join(tmp, "console-%d" % aport); b = os.path.join(root, "data", "blazing"); os.makedirs(b)
     open(os.path.join(b, "mount.conf"), "w").write("host 127.0.0.1\nport %d\nmin_free_mb 0\ntsnet 0\nfw 10.20\npoll_secs 3600\n" % iport_img)
     env = dict(os.environ, BM_ROOT=root, BM_FAKE_AI=fake, BM_FAKE_AI_DELAY_MS=str(delay))
+    if helper:
+        env["BM_INST_HELPER"] = hexe
     proc = subprocess.Popen([exe], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     api = "http://127.0.0.1:%d" % aport
     for _ in range(50):
@@ -213,6 +216,17 @@ def main():
         call(api4, "POST", "/api/install?path=" + urllib.parse.quote(REL))
         j = wait(api4, t=20)
         check(j.get("state") == "failed" and "nothing moved" in j.get("error", "") and "downloading" in j.get("error", ""), "6. stalled -> failed: %s" % j.get("error"))
+
+        # 7: the installer installs ONE package per process (Sony: 0x80B2116F after that). With the helper every install gets a fresh
+        # process (1 + 2 above ran on one payload); without one, the 2nd install in the payload falls back to PKG Manager.
+        p5, api5, _, log5 = start(tmp, img_port, pm_port, "on", helper=False); procs.append(p5)
+        call(api5, "POST", "/api/install?path=" + urllib.parse.quote(REL)); j1 = wait(api5)
+        del PMSEEN[:]
+        call(api5, "POST", "/api/install?path=" + urllib.parse.quote(REL)); j2 = wait(api5)
+        check(j1.get("state") == "done" and j1.get("via") == "sony" and j2.get("state") == "done" and j2.get("via") == "pkgmanager" and PMSEEN,
+              "7. no helper: 1st install in the payload (%s/%s), 2nd -> 0x80B2116F -> PKG Manager (%s/%s)" % (j1.get("state"), j1.get("via"), j2.get("state"), j2.get("via")))
+        check("0x80b2116f" in open(log5).read().lower(), "7. the payload log shows the one-per-process refusal")
+        check("helper process" in open(log).read(), "7. with the helper: installs ran in a helper process")
 
         text = open(log).read()
         check("sceAppInstUtilInstallByPackage http://127.0.0.1:" in text and "ui: install A Test & App (v1)" in text, "the payload log records the install")
