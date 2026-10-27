@@ -42,7 +42,10 @@ static int (*ai_init)(void), (*ai_term)(void);
 static int (*ai_by_package)(ai_meta_t *, ai_pkg_info_t *, ai_playgo_t *);
 static int (*ai_get_status)(const char *, ai_status_t *);
 static char g_ai_why[160];
-static int g_ai_pre[3];                    // NetCtl / UserService / Net init results (the helper logs them)
+static int g_ai_pre[3];
+#ifndef AI_TRACE
+#define AI_TRACE(step) ((void)0)
+#endif                    // NetCtl / UserService / Net init results (the helper logs them)
 
 #ifdef __PROSPERO__
 #include <ps5/kernel.h>
@@ -58,21 +61,29 @@ static intptr_t ai_sym(const char *module, const char *sym) {   // the module's 
     return kernel_dynlib_dlsym(-1, h, sym);
 }
 static int ai_bring_up(void) {
-    // the same session set-up PKG Manager's helper makes before AppInstUtil (NetCtl, UserService with priority 256, Net): without it a
-    // fresh helper process got 0x80B22404 for every URL on DIGI5 13.60 (27 Oct) while the long-running payload's call worked
-    int (*netctl)(void) = (int (*)(void))ai_sym("libSceNetCtl.sprx", "sceNetCtlInit");
-    int (*usersvc)(int *) = (int (*)(int *))ai_sym("libSceUserService.sprx", "sceUserServiceInitialize");
-    int (*netinit)(void) = (int (*)(void))ai_sym("libSceNet.sprx", "sceNetInit");
-    int prio = 256;
-    g_ai_pre[0] = netctl ? netctl() : -1; g_ai_pre[1] = usersvc ? usersvc(&prio) : -1; g_ai_pre[2] = netinit ? netinit() : -1;
     int (*sysmod)(unsigned) = (int (*)(unsigned))ai_sym("libSceSysmodule.sprx", "sceSysmoduleLoadModuleInternal");
+    AI_TRACE("sysmodule loader");
     if (sysmod) { sysmod(0x8000001d); sysmod(0x80000011); sysmod(0x80000010); sysmod(0x80000014); }   // IPMI, UserService, SystemService, AppInstUtil
+    AI_TRACE("sysmodules loaded");
+    // then the session set-up PKG Manager's helper makes before AppInstUtil (NetCtl, UserService with priority 256, Net): a fresh
+    // helper without it got 0x80B22404 for every URL on DIGI5 13.60 (27 Oct) while the long-running payload's own call worked.
+    // Only in the helper (BM_AI_SESSION_SETUP): before the sysmodules were loaded these calls hung the helper.
+#ifdef BM_AI_SESSION_SETUP
+    int (*netctl)(void) = (int (*)(void))ai_sym("libSceNetCtl.sprx", "sceNetCtlInit");
+    g_ai_pre[0] = netctl ? netctl() : -1; AI_TRACE("netctl");
+    int (*usersvc)(int *) = (int (*)(int *))ai_sym("libSceUserService.sprx", "sceUserServiceInitialize");
+    int prio = 256; g_ai_pre[1] = usersvc ? usersvc(&prio) : -1; AI_TRACE("userservice");
+    int (*netinit)(void) = (int (*)(void))ai_sym("libSceNet.sprx", "sceNetInit");
+    g_ai_pre[2] = netinit ? netinit() : -1; AI_TRACE("net");
+#endif
     ai_init = (int (*)(void))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilInitialize");
     ai_term = (int (*)(void))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilTerminate");
     ai_by_package = (int (*)(ai_meta_t *, ai_pkg_info_t *, ai_playgo_t *))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilInstallByPackage");
     ai_get_status = (int (*)(const char *, ai_status_t *))ai_sym("libSceAppInstUtil.sprx", "sceAppInstUtilGetInstallStatus");
     if (!ai_init || !ai_by_package || !ai_get_status) { snprintf(g_ai_why, sizeof g_ai_why, "libSceAppInstUtil symbols not found"); return -1; }
+    AI_TRACE("symbols");
     int rc = ai_init();
+    AI_TRACE("initialized");
     if (rc) { snprintf(g_ai_why, sizeof g_ai_why, "sceAppInstUtilInitialize 0x%08x", (unsigned)rc); return -1; }
     return 0;
 }
@@ -129,6 +140,7 @@ static int fake_by_package(ai_meta_t *m, ai_pkg_info_t *info, ai_playgo_t *pg) {
     (void)pg;
     const char *mode = getenv("BM_FAKE_AI") ? getenv("BM_FAKE_AI") : "";
     if (!strcmp(mode, "refuse")) return (int)0x80B21104u;
+    if (!strcmp(mode, "hang")) { sleep(3600); return -1; }          // a Sony call that never returns
     pthread_mutex_lock(&g_fake_mu);
     if (g_fake.used) { pthread_mutex_unlock(&g_fake_mu); return (int)AI_INVALID_SLOT; }   // one install per process, like Sony's
     g_fake.used = 1;

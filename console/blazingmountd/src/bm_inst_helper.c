@@ -13,6 +13,13 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#ifdef __PROSPERO__
+#define BM_AI_SESSION_SETUP 1
+static void ai_trace(const char *step) {                          // /data/blazing/inst-helper.log: where a helper got to
+    FILE *f = fopen("/data/blazing/inst-helper.log", "a"); if (f) { fprintf(f, "helper %d: %s\n", (int)getpid(), step); fclose(f); }
+}
+#define AI_TRACE(step) ai_trace(step)
+#endif
 #include "bm_ai.h"
 
 static int rd(int s, void *b, size_t n) { char *p = b; while (n) { ssize_t r = read(s, p, n); if (r <= 0) return -1; p += r; n -= (size_t)r; } return 0; }
@@ -26,6 +33,9 @@ int main(void) {
     if (s < 0 || connect(s, (struct sockaddr *)&a, sizeof a)) return 1;
     struct timeval tv = { 120, 0 };                                // blazingmountd polls every second; silence = it is gone
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    AI_TRACE("connected");
+    { ih_resp_t hello; memset(&hello, 0, sizeof hello); hello.magic = IH_MAGIC; hello.rc = (int32_t)getpid(); snprintf(hello.status, sizeof hello.status, "hello");
+      if (wr(s, &hello, sizeof hello)) return 1; }                 // the pid first: blazingmountd stops a helper that hangs
     int up = ai_bring_up() == 0, installed = 0;
 #ifdef __PROSPERO__
     FILE *lf = fopen("/data/blazing/inst-helper.log", "a");      // one line per helper: what the set-up and the install answered

@@ -211,6 +211,22 @@ def main():
             j = wait(api3)
             check(j.get("state") == "failed" and ("installer" in j.get("error", "")), "5. installer %s + url= -> failed plainly: %s" % (mode, j.get("error")))
 
+        # 5b: a helper stuck inside the installer call -> stopped, and the drive pkg goes to PKG Manager
+        p6, api6, _, log6 = start(tmp, img_port, pm_port, "hang"); procs.append(p6)
+        call(api6, "POST", "/api/install?path=" + urllib.parse.quote(REL))
+        j = wait(api6, t=60)
+        import re
+        m = re.search(r"stopping helper pid (\d+)", open(log6).read())
+        gone = False
+        if m:
+            time.sleep(0.5)
+            try:
+                os.kill(int(m.group(1)), 0)
+                gone = open("/proc/%s/stat" % m.group(1)).read().split()[2] == "Z" if os.path.exists("/proc") else subprocess.run(["ps", "-o", "stat=", "-p", m.group(1)], capture_output=True, text=True).stdout.strip().startswith("Z")
+            except OSError:
+                gone = True
+        check(j.get("state") == "done" and j.get("via") == "pkgmanager" and m and gone, "5b. hung helper stopped (pid %s, gone %s) -> PKG Manager: %s/%s" % (m and m.group(1), gone, j.get("state"), j.get("via")))
+
         # 6: the installer never finishes
         p4, api4, _, _ = start(tmp, img_port, pm_port, "stall"); procs.append(p4)
         call(api4, "POST", "/api/install?path=" + urllib.parse.quote(REL))

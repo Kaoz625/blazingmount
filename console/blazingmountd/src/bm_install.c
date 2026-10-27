@@ -73,11 +73,14 @@ static const unsigned char bm_inst_helper[1] = { 0 };
 #define BM_ELFLDR_PORT 9021
 #endif
 #include <sys/wait.h>
+#include <signal.h>
 
 typedef struct { int ipc, elf, inproc; pid_t pid; } be_t;           // one install's link to Sony's installer
 static int g_ai_state;                    // in-process fallback: 0 not tried, 1 ready, -1 unavailable
 static int g_ipc_ls = -1;
 static char g_be_why[200];
+static void be_close(be_t *b);
+static void be_kill(be_t *b);
 
 static int be_listen(void) {                                       // 127.0.0.1:BM_INST_IPC, once
     if (g_ipc_ls >= 0) return 0;
@@ -119,6 +122,12 @@ static int be_launch(be_t *b) {
     if (b->ipc < 0) { snprintf(g_be_why, sizeof g_be_why, "accept failed"); if (b->elf >= 0) close(b->elf); b->elf = -1; return -1; }
     struct timeval tv = { 30, 0 };
     setsockopt(b->ipc, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(b->ipc, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    ih_resp_t hello; ssize_t got = 0;                              // the helper's pid comes first
+    while (got < (ssize_t)sizeof hello) { ssize_t n = read(b->ipc, (char *)&hello + got, sizeof hello - (size_t)got); if (n <= 0) break; got += n; }
+    if (got != (ssize_t)sizeof hello || hello.magic != IH_MAGIC || strcmp(hello.status, "hello")) {
+        snprintf(g_be_why, sizeof g_be_why, "the helper said no hello"); be_close(b); return -1;
+    }
+    b->pid = (pid_t)hello.rc;
     return 0;
 }
 static int be_rd(int s, void *p, size_t n) { char *q = p; while (n) { ssize_t r = read(s, q, n); if (r <= 0) return -1; q += r; n -= (size_t)r; } return 0; }
@@ -137,8 +146,11 @@ static int be_call(be_t *b, int op, const char *uri, const char *name, const cha
     }
     ih_req_t q; memset(&q, 0, sizeof q); q.magic = IH_MAGIC; q.op = (uint32_t)op;
     snprintf(q.uri, sizeof q.uri, "%s", uri ? uri : ""); snprintf(q.name, sizeof q.name, "%s", name ? name : ""); snprintf(q.cid, sizeof q.cid, "%s", cid ? cid : "");
-    if (write_all(b->ipc, &q, sizeof q) || be_rd(b->ipc, r, sizeof *r) || r->magic != IH_MAGIC) return -1;
+    if (write_all(b->ipc, &q, sizeof q) || be_rd(b->ipc, r, sizeof *r) || r->magic != IH_MAGIC) { be_kill(b); return -1; }
     return 0;
+}
+static void be_kill(be_t *b) {                                     // a helper that stopped answering (stuck in a Sony call)
+    if (b->pid > 0) { logf_("install: stopping helper pid %d (no answer)", (int)b->pid); kill(b->pid, SIGKILL); }
 }
 static void be_close(be_t *b) {
     if (b->ipc >= 0) { ih_req_t q; memset(&q, 0, sizeof q); q.magic = IH_MAGIC; q.op = IH_BYE; write_all(b->ipc, &q, sizeof q); close(b->ipc); }
