@@ -798,7 +798,7 @@ static int build_game(const conf_t *c, const game_t *g, int cfw, char *reason, s
         for (int i = 0; i < nr; i++) o += (size_t)snprintf(cfg + o, cap2 - o, "file %lld %s\n", big[i]->size, big[i]->path);
         // same keys and order as mkgame.cfg_text (24 Oct): dc_queue only when not the link's default 16 (we never set it)
         o += (size_t)snprintf(cfg + o, cap2 - o, "block_kb 256\ncache_mb %d\nconns %d\nasync 1\ntimeout_ms 8000\nstats_s 2\nlog_first 60\n"
-                              "trace_opens 100\ntrace_io 60\ntrace_apr 60\n", c->cache_mb_ram, c->conns);
+                              "trace_opens 1000000\ntrace_io 60\ntrace_apr 60\n", c->cache_mb_ram, c->conns);
         if (dc > 0) o += (size_t)snprintf(cfg + o, cap2 - o, "disk_cache_mb %lld\n", dc);
         if (c->readahead_kb > 0) o += (size_t)snprintf(cfg + o, cap2 - o, "readahead_kb %d\n", c->readahead_kb);
         char lp[600], cfgp[700], tmp[720];
