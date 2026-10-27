@@ -19,9 +19,9 @@ FORK="${FORK:-$HERE/../link-fork/prebuilt/libSceAmpr.sprx}"
 [ -f "$FORK" ] || { echo "no fork at $FORK (set FORK=...)"; exit 1; }
 mkdir -p "$HERE/out"
 if [ -n "$BM_REV" ]; then
-  VERSION="2.9-$BM_REV"
+  VERSION="2.10-$BM_REV"
 else
-  VERSION="2.9-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo local)$(git -C "$HERE" diff --quiet -- src 2>/dev/null || echo '+dirty')"
+  VERSION="2.10-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo local)$(git -C "$HERE" diff --quiet -- src 2>/dev/null || echo '+dirty')"
 fi
 python3 -I - "$FORK" "$HERE/out/fork_blob.h" <<'EOF'
 import hashlib, sys

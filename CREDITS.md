@@ -13,6 +13,7 @@ them and records the license position. The pre-release checklist at the bottom i
 | **PS5 homebrew launcher** (idlesauce) | auto-scans `/data/homebrew` for homebrew tiles. External, referenced only. | runtime | author's terms |
 | **ps-neighborhood** `PS5PKGTool.Ffpfsc` / `Ufs2` | imgserve's on-demand `.ffpfsc` + exFAT/UFS2 decoder. **External build dependency — not vendored**; obtain a checkout and set `FFPFSC_SRC` (dirserve for game *folders* needs none of this). | build (imgserve) | **GPL-3.0** |
 | **PS5 payload SDK** | builds the link fork and `blazingmountd`. Referenced by the build scripts; not vendored. | build | its own terms |
+| **PKG Manager** (itsPLK/ps5-pkg-manager) | the install FALLBACK: `blazingmountd` passes a drive pkg to the PKG Manager already running on the console (`/api/pm/*`, `bm_install.c`). Its ARCHITECTURE.md documents the public AppInstUtil structure layouts that `bm_install.c` also uses (our own code calls Sony's installer). External, not vendored. | runtime + reference | **GPL-3.0** |
 
 > **Attribution note for packagers:** when you distribute a *built* `libSceAmpr.sprx`, you are
 > distributing a GPL-3 binary and must provide its complete corresponding source (our

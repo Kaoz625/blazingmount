@@ -32,6 +32,9 @@
 //                                    with no copy first, through PKG Manager on this console (:8844)
 //   GET  /api/store, POST /api/store/install?kind=app|payload|pkg&path=&name=&size=   v2.9 (bm_store.c): the homebrew store over the
 //                                    host's /homebrew.json + /hb/: app folders into the homebrew dir, payloads into a payload slot
+//   GET  /api/install | /api/install/pkgs, POST /api/install?path=|url=&name= | /api/install/cancel   v2.10 (bm_install.c): the PS5's
+//                                    own installer reads a PKG from the host through this payload (live %/rate/ETA, cancel);
+//                                    PKG Manager is the fallback
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
 //        | download | remove_local | cancel_dl (v2.8: one line per title in /data/blazing/downloads.tsv for mac1's worker)
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
@@ -1022,6 +1025,7 @@ static void api_smp(int s, const char *method, const char *target, const char *q
 }
 
 #include "bm_store.c"              // v2.9: the homebrew store (GET /api/store, POST /api/store/install)
+#include "bm_install.c"            // v2.10: BlazingMount installs a PKG itself from the host (GET/POST /api/install, /cancel, /pkgs)
 
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
 static const struct { const char *k, *type, *help; } k_keys[] = {
@@ -1344,6 +1348,7 @@ static void api_handle(int s) {
     else if (!strncmp(target, "/api/pm/", 8)) api_pm(s, method, target, query, req);
     else if (!strncmp(target, "/api/smp/", 9)) api_smp(s, method, target, query, req);
     else if (!strcmp(target, "/api/store") || !strcmp(target, "/api/store/install")) api_store(s, method, target, query, req);
+    else if (!strcmp(target, "/api/install") || !strncmp(target, "/api/install/", 13)) api_install(s, method, target, query, req);
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/pull")) { api_pull_status(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "POST") && !strcmp(target, "/api/pull")) {
         char v[8];
