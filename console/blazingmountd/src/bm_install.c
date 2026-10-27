@@ -224,7 +224,7 @@ static void *inst_conn(void *arg) {
         long long a = 0, b = -1;
         if (rg) { char *d; a = strtoll(rg + 14, &d, 10); if (*d == '-' && d[1] >= '0' && d[1] <= '9') b = strtoll(d + 1, NULL, 10); }
         memmove(req, req + hl, have - hl); have -= hl; req[have] = 0;
-        if (sscanf(target, "/i/%u.pkg", &id) != 1 || (strcmp(method, "GET") && strcmp(method, "HEAD")) || !inst_live(id)) {
+        if (sscanf(target, "/i/%u-", &id) != 1 || !ends_with(target, ".pkg", 0) || (strcmp(method, "GET") && strcmp(method, "HEAD")) || !inst_live(id)) {
             inst_simple(s, 404, "Not Found"); goto out;             // a .crc sidecar, an old job, a cancelled one
         }
         long long total = 0;
@@ -368,7 +368,8 @@ static void *inst_run(void *arg) {
         return NULL;
     }
     char uri[120], name[200];
-    snprintf(uri, sizeof uri, "http://127.0.0.1:%d/i/%u.pkg", BM_INST_PORT, id);
+    snprintf(uri, sizeof uri, "http://127.0.0.1:%d/i/%u-%lld.pkg", BM_INST_PORT, id, (long long)time(NULL));   // never the same URL twice:
+    // the PS5 keeps a download task per URL, and a URL used before (/i/1.pkg after a payload restart) = 0x80B2116F INVALID_SLOT
     pthread_mutex_lock(&g_inst_mu); snprintf(name, sizeof name, "%s", g_inst.name); snprintf(g_inst.via, sizeof g_inst.via, "sony"); pthread_mutex_unlock(&g_inst_mu);
     inst_set("installing", "handing it to the PS5 installer");
     ih_resp_t r;

@@ -148,15 +148,18 @@ static int ai_bring_up(void) {
 }
 #endif
 
-// one install request -> rc + content id (playgo block on the heap: ~10 KB)
+// one install request -> rc + content id. Every argument stays alive and unchanged for the life of the process: the system may still
+// refer to them after the call returns (PKG Manager's helper keeps them the same way). Static: one install per process anyway.
+static char g_ai_uri[256], g_ai_name[128];
+static ai_meta_t g_ai_meta;
+static ai_pkg_info_t g_ai_info;
+static ai_playgo_t g_ai_playgo;
 static int ai_install_uri(const char *uri, const char *name, char *cid_out, size_t cn) {
-    ai_meta_t m = { uri, "", "", "", name, "" };
-    ai_pkg_info_t info; memset(&info, 0, sizeof info);
-    ai_playgo_t *pg = calloc(1, sizeof *pg);
-    if (!pg) return -1;
-    int rc = ai_by_package(&m, &info, pg);
-    free(pg);
-    snprintf(cid_out, cn, "%.48s", info.content_id);
+    snprintf(g_ai_uri, sizeof g_ai_uri, "%s", uri); snprintf(g_ai_name, sizeof g_ai_name, "%s", name);
+    g_ai_meta = (ai_meta_t){ g_ai_uri, "", "", "", g_ai_name, "" };
+    memset(&g_ai_info, 0, sizeof g_ai_info); memset(&g_ai_playgo, 0, sizeof g_ai_playgo);
+    int rc = ai_by_package(&g_ai_meta, &g_ai_info, &g_ai_playgo);
+    snprintf(cid_out, cn, "%.47s", g_ai_info.content_id);
     return rc;
 }
 #endif

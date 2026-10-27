@@ -195,7 +195,7 @@ def main():
         served = call(api2, "GET", "/api/install")[1].get("served")
         check(code == 200 and j.get("state") == "cancelled", "3. cancel -> cancelled (%s)" % j.get("step"))
         check(served < len(PKG), "3. the proxy stopped: %s of %d bytes served" % (served, len(PKG)))
-        s = socket.create_connection(("127.0.0.1", iport2)); s.sendall(b"GET /i/%d.pkg HTTP/1.1\r\nRange: bytes=0-9\r\n\r\n" % j["id"])
+        s = socket.create_connection(("127.0.0.1", iport2)); s.sendall(b"GET /i/%d-%d.pkg HTTP/1.1\r\nRange: bytes=0-9\r\n\r\n" % (j["id"], int(time.time())))
         check(s.recv(100).startswith(b"HTTP/1.1 404"), "3. the cancelled job's URL is a 404 now"); s.close()
 
         # 5: no installer in the payload / the installer refuses -> PKG Manager (drive pkgs); a url install fails plainly
@@ -229,6 +229,9 @@ def main():
         check("helper process" in open(log).read(), "7. with the helper: installs ran in a helper process")
 
         text = open(log).read()
+        import re
+        uris = re.findall(r"InstallByPackage (http://127\.0\.0\.1:\d+/i/\S+\.pkg)", text)
+        check(len(uris) >= 2 and len(set(uris)) == len(uris), "the installer never gets the same URL twice (%s)" % uris)
         check("sceAppInstUtilInstallByPackage http://127.0.0.1:" in text and "ui: install A Test & App (v1)" in text, "the payload log records the install")
     finally:
         for p in procs:
