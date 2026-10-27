@@ -32,7 +32,7 @@ typedef struct {
     char state[12];                       // idle | starting | installing | done | failed | cancelled
     char via[12];                         // sony | pkgmanager
     char src[900], name[200], err[300], step[200];
-    char up_host[64], up_path[900]; int up_port, up_route;      // upstream: up_route = 1 -> the daemon's route to its host
+    char up_host[64], up_path[900]; int up_port, up_route, up_px;   // up_route 1: the daemon's route to its host; up_px 1: a PC answers only via the tsnet proxy
     char content_id[64], title_id[16], sony_status[20];
     long long total, served, done, rate;
     int remain, sony_error, cancel;
@@ -172,18 +172,27 @@ static int be_open(be_t *b) {
 
 // ---------------------------------------------------------------- upstream: one Range read of the source
 static int inst_up_open(long long a, long long b, long long *total, char *pre, size_t *pre_n, char *why, size_t wn) {
-    char host[64], path[900]; int port, route;
+    char host[64], path[900]; int port, route, via_px;
     pthread_mutex_lock(&g_inst_mu);
     snprintf(host, sizeof host, "%s", g_inst.up_host); snprintf(path, sizeof path, "%s", g_inst.up_path);
-    port = g_inst.up_port; route = g_inst.up_route;
+    port = g_inst.up_port; route = g_inst.up_route; via_px = g_inst.up_px;
     pthread_mutex_unlock(&g_inst_mu);
-    int px = 0, s = route ? route_connect(host, port, 20, &px) : connect_ms(host, port, 5000);
-    if (s < 0) { snprintf(why, wn, "cannot reach %s:%d", host, port); return -1; }
+    int px = 0, s = -1;
+    if (route) s = route_connect(host, port, 20, &px);
+    else {                                                         // a PC's URL: direct, else through the tsnet proxy (the PC on the
+        if (!via_px) s = connect_ms(host, port, 5000);             // tailnet, or on another subnet) - then the job keeps that way
+        if (s < 0 && g_px_port && (s = connect_ms(g_px_host, g_px_port, 10000)) >= 0) {
+            px = 2;
+            if (!via_px) { pthread_mutex_lock(&g_inst_mu); g_inst.up_px = 1; pthread_mutex_unlock(&g_inst_mu); logf_("install: %s:%d via the tsnet proxy", host, port); }
+        }
+    }
+    if (s < 0) { snprintf(why, wn, "cannot reach %s:%d%s", host, port, g_px_port ? " (direct or via the tsnet proxy)" : ""); return -1; }
     struct timeval tv = { 30, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     char enc[2000], req[2400]; url_path(enc, sizeof enc, path);
+    const char *ah = px == 2 ? host : g_ts_host;                    // absolute form: the tailnet server, or the PC itself
     int rl = px ? snprintf(req, sizeof req, "GET http://%s:%d%s HTTP/1.0\r\nHost: %s:%d\r\nRange: bytes=%lld-%lld\r\nConnection: close\r\n\r\n",
-                           g_ts_host, port, enc, g_ts_host, port, a, b)
+                           ah, port, enc, ah, port, a, b)
                 : snprintf(req, sizeof req, "GET %s HTTP/1.0\r\nHost: %s:%d\r\nRange: bytes=%lld-%lld\r\nConnection: close\r\n\r\n", enc, host, port, a, b);
     if (write_all(s, req, (size_t)rl)) { close(s); snprintf(why, wn, "request not sent"); return -1; }
     char h[4096]; size_t have = 0; char *e = NULL;

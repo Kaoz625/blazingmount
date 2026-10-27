@@ -108,11 +108,11 @@ def build(tmp, aport, iport, pport, ipc):
     return exe, helper
 
 
-def start(tmp, iport_img, pport, fake, delay=0, helper=True):
+def start(tmp, iport_img, pport, fake, delay=0, helper=True, conf=""):
     aport, iport, ipc = free_port(), free_port(), free_port()
     exe, hexe = build(tmp, aport, iport, pport, ipc)
     root = os.path.join(tmp, "console-%d" % aport); b = os.path.join(root, "data", "blazing"); os.makedirs(b)
-    open(os.path.join(b, "mount.conf"), "w").write("host 127.0.0.1\nport %d\nmin_free_mb 0\ntsnet 0\nfw 10.20\npoll_secs 3600\n" % iport_img)
+    open(os.path.join(b, "mount.conf"), "w").write(("host 127.0.0.1\nport %d\nmin_free_mb 0\ntsnet 0\nfw 10.20\npoll_secs 3600\n" % iport_img) + conf)
     env = dict(os.environ, BM_ROOT=root, BM_FAKE_AI=fake, BM_FAKE_AI_DELAY_MS=str(delay))
     if helper:
         env["BM_INST_HELPER"] = hexe
@@ -252,6 +252,27 @@ def main():
         pr.send_signal(_sig.SIGINT)
         out, _ = pr.communicate(timeout=30)
         check(pr.returncode == 2 and "cancelled" in out, "8. install-pkg.py Ctrl-C -> the install is cancelled (exit %s)" % pr.returncode)
+
+        # 9: a PC the console cannot reach directly (another subnet, the tailnet): the URL goes through the tsnet proxy, absolute form
+        px_port = free_port()
+        class Px(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+            def log_message(self, *a):
+                pass
+            def do_GET(self):
+                SEEN.append(("PX " + self.path, self.headers.get("Range")))
+                if self.path == "http://192.0.2.1:8000/files/From%20The%20PC.pkg":
+                    return ranged(self, PKG)
+                self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+        pxs = http.server.ThreadingHTTPServer(("127.0.0.1", px_port), Px); threading.Thread(target=pxs.serve_forever, daemon=True).start()
+        p7, api7, _, log7 = start(tmp, img_port, pm_port, "on", conf="tsnet 1\nproxy 127.0.0.1 %d\n" % px_port); procs.append(p7)
+        n0 = len(SEEN)
+        call(api7, "POST", "/api/install?url=" + urllib.parse.quote("http://192.0.2.1:8000/files/From The PC.pkg", safe=""))
+        j = wait(api7, t=60)
+        pxreads = [p for p, r in SEEN[n0:] if p.startswith("PX ")]
+        check(j.get("state") == "done" and j.get("served") == len(PKG) and len(pxreads) >= 3 and "via the tsnet proxy" in open(log7).read(),
+              "9. a PC only the tailnet reaches: installed through the tsnet proxy (%s, %d proxied reads)" % (j.get("state"), len(pxreads)))
+        pxs.shutdown()
 
         # 7: the installer installs ONE package per process (Sony: 0x80B2116F after that). With the helper every install gets a fresh
         # process (1 + 2 above ran on one payload); without one, the 2nd install in the payload falls back to PKG Manager.
