@@ -38,7 +38,7 @@ static pull_t g_pull = { .state = "idle", .fd = -1, .recfd = -1 };
 static pthread_mutex_t g_pull_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int pull_src_ok(const char *s) {
-    if (strncmp(s, "/raw/", 5) && strncmp(s, "/d/", 3) && strncmp(s, "/t/", 3)) return 0;
+    if (strncmp(s, "/raw/", 5) && strncmp(s, "/d/", 3) && strncmp(s, "/t/", 3) && strncmp(s, "/hb/", 4)) return 0;   // /hb/: the store (bm_store.c)
     if (strstr(s, "..") || strstr(s, "//")) return 0;
     for (const unsigned char *q = (const unsigned char *)s; *q; q++) if (*q < 0x20 || *q == 0x7f) return 0;
     return 1;
@@ -181,14 +181,11 @@ static void *pull_thread(void *arg) {               // runs the workers, keeps t
     return NULL;
 }
 
-static int api_pull_start(sb_t *o, const char *query) {              // the HTTP status; the JSON answer in o
-    char src[700] = "", dest[700] = "", v[32];
-    get_q(query, "src", src, sizeof src); get_q(query, "dest", dest, sizeof dest);
-    long long size = get_q(query, "size", v, sizeof v) ? atoll(v) : -1;
-    int conns = get_q(query, "conns", v, sizeof v) ? atoi(v) : 4;
+// Start one pull (the API's POST and the store's install thread). The HTTP status; the JSON answer in o. port 0 = imgserve's.
+static int pull_begin(sb_t *o, const char *src, int port, const char *dest, long long size, int conns) {
     conf_t *c = malloc(sizeof *c); if (!c) { sb_puts(o, "{\"error\":\"out of memory\"}"); return 500; }
     read_conf(c);
-    int port = get_q(query, "port", v, sizeof v) ? atoi(v) : c->port;
+    if (port <= 0) port = c->port;
     int port_ok = port == c->port || port == c->port + 1;            // imgserve, or dirserve beside it (4451 + 1)
     free(c);
     if (!pull_src_ok(src)) { sb_puts(o, "{\"error\":\"src must be /raw/<image>, /d/<folder>/<file> or /t/<TID>/<file> on the host\"}"); return 400; }
@@ -246,6 +243,15 @@ static int api_pull_start(sb_t *o, const char *query) {              // the HTTP
     pthread_mutex_unlock(&g_pull_mu);
     sb_f(o, "{\"ok\":true,\"pieces\":%lld,\"pieces_done\":%lld,\"done\":%lld}", pieces, pd, have);
     return 200;
+}
+
+static int api_pull_start(sb_t *o, const char *query) {              // POST /api/pull: the HTTP status; the JSON answer in o
+    char src[700] = "", dest[700] = "", v[32];
+    get_q(query, "src", src, sizeof src); get_q(query, "dest", dest, sizeof dest);
+    long long size = get_q(query, "size", v, sizeof v) ? atoll(v) : -1;
+    int conns = get_q(query, "conns", v, sizeof v) ? atoi(v) : 4;
+    int port = get_q(query, "port", v, sizeof v) ? atoi(v) : 0;
+    return pull_begin(o, src, port, dest, size, conns);
 }
 
 static void api_pull_status(sb_t *o) {

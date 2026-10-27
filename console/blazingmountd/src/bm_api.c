@@ -29,6 +29,8 @@
 //                                    incoming/ on several Range connections, resumable; mac1 verifies with /api/sha256 as before
 //   GET  /api/pm/drives|packages|queue|status, POST /api/pm/install?path=|cancel?id=|refresh   v2.9: install a PKG from the drives
 //                                    with no copy first, through PKG Manager on this console (:8844)
+//   GET  /api/store, POST /api/store/install?kind=app|payload|pkg&path=&name=&size=   v2.9 (bm_store.c): the homebrew store over the
+//                                    host's /homebrew.json + /hb/: app folders into the homebrew dir, payloads into a payload slot
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
 //        | download | remove_local | cancel_dl (v2.8: one line per title in /data/blazing/downloads.tsv for mac1's worker)
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
@@ -989,6 +991,8 @@ static void api_pm(int s, const char *method, const char *target, const char *qu
     free(b.b);
 }
 
+#include "bm_store.c"              // v2.9: the homebrew store (GET /api/store, POST /api/store/install)
+
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
 static const struct { const char *k, *type, *help; } k_keys[] = {
     { "host", "s", "The computer with your game drives (imgserve)" },
@@ -1308,6 +1312,7 @@ static void api_handle(int s) {
         }
     }
     else if (!strncmp(target, "/api/pm/", 8)) api_pm(s, method, target, query, req);
+    else if (!strcmp(target, "/api/store") || !strcmp(target, "/api/store/install")) api_store(s, method, target, query, req);
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/pull")) { api_pull_status(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "POST") && !strcmp(target, "/api/pull")) {
         char v[8];
