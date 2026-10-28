@@ -422,6 +422,19 @@ def main():
                     st, g = call(api, "GET", "/src/smb-live/" + urllib.parse.quote(e["name"]), raw=True)
                     check(ij.get("state") == "done" and g == open(dump, "rb").read() and len(g) == e["size"],
                           "smb: installed %s (%d bytes), the dump = the gateway's bytes (sha %s)" % (e["name"], sz, sha(g)[:12]))
+                    # parallel sessions (Sony's installer reads on several connections): libsmb2 on the PS5 gave every one the same client GUID
+                    # and the server dropped them all - six at once must each get their bytes, byte-exact
+                    res = {}
+                    def one(i, e=e, g=g):
+                        a0 = (len(g) // 6) * i; b0 = a0 + len(g) // 6 - 1
+                        rq = urllib.request.Request(api + "/src/smb-live/" + urllib.parse.quote(e["name"]), headers={"Range": "bytes=%d-%d" % (a0, b0)})
+                        try:
+                            res[i] = urllib.request.urlopen(rq, timeout=90).read() == g[a0:b0 + 1]
+                        except OSError:
+                            res[i] = False
+                    ths = [threading.Thread(target=one, args=(i,)) for i in range(6)]
+                    [x.start() for x in ths]; [x.join() for x in ths]
+                    check(all(res.get(i) for i in range(6)), "smb: 6 parallel sessions each read their range byte-exact: %s" % [res.get(i) for i in range(6)])
                     break
         elif spec:
             print("FAIL  BM_TEST_SMB set but the host build has no libsmb2 (sh console/blazingmountd/tools/build-libsmb2.sh host)"); globals()["fails"] += 1

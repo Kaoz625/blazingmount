@@ -544,7 +544,8 @@ static int inst_begin(const char *host, int port, int route, const char *up, con
     if (srcname) snprintf(g_inst.srcname, sizeof g_inst.srcname, "%s", srcname);
     g_inst.started = g_inst.moved = time(NULL); snprintf(g_inst.step, sizeof g_inst.step, "asking the source for its size");
     pthread_mutex_unlock(&g_inst_mu);
-    logf_("ui: install %s from %s:%d%s (job %u)", name, host, port, up, id);
+    if (srcname) logf_("ui: install %s from source %s (%s:%d), %s (job %u)", name, srcname, host, port, up, id);
+    else logf_("ui: install %s from %s:%d%s (job %u)", name, host, port, up, id);
     pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 512 * 1024);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     int pc = pthread_create(&t, &at, inst_run, NULL);

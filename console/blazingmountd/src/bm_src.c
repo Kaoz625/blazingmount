@@ -34,7 +34,7 @@
 #define SRC_MAX        16
 #define SRC_MAXPARTS   128
 #define SRC_MAXENT     1500
-#define SRC_IO_S       12                    // one network read/write may take this long (the API thread must never hang on a dead host)
+#define SRC_IO_S       30                    // one network read/write may take this long (the API thread must never hang on a dead host)
 
 typedef struct { char name[32], kind[8], host[64]; int port; char base[400]; char user[64], pass[96]; } src_t;
 typedef struct { char name[256]; int dir; long long size; int parts; } sent_t;
@@ -485,21 +485,51 @@ static int smb_split(const sess_t *ss, const char *rel, char *share, size_t sn, 
     o[k] = 0;
     return 0;
 }
+// libsmb2 on the PS5 has no strong random source (config.h: no arc4random/getrandom//dev/urandom) and falls back to random() re-seeded by every
+// smb2_init_context, and it keeps every context on ONE global list: two sessions opened at once (Sony's installer reads on several connections,
+// 28 Oct 2026) got the SAME client GUID - the server drops the older connection of a GUID it already knows ("Timeout expired and no connection exists",
+// 6 parallel gateway reads all failed on PHAT5, all fine on the Mac). So: init/destroy under one lock, a GUID of our own for every session, one handshake at a time.
+static pthread_mutex_t g_smb_mu = PTHREAD_MUTEX_INITIALIZER, g_smb_conn_mu = PTHREAD_MUTEX_INITIALIZER;
+static void smb_guid(uint8_t g[16]) {                              // call under g_smb_mu
+    static unsigned ctr;
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    int fd = open("/dev/urandom", O_RDONLY); ssize_t n = -1;
+    if (fd >= 0) { n = read(fd, g, 16); close(fd); }
+    uint64_t x = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 20) ^ ((uint64_t)getpid() << 40) ^ (uint64_t)(uintptr_t)g ^ (++ctr * 0x9E3779B97F4A7C15ull);
+    uint8_t mix[16];
+    for (int i = 0; i < 2; i++) {                                  // splitmix64: unique even with no entropy source; XORed over whatever /dev/urandom gave
+        x += 0x9E3779B97F4A7C15ull; uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; z ^= z >> 31;
+        memcpy(mix + 8 * i, &z, 8);
+    }
+    for (int i = 0; i < 16; i++) g[i] = n == 16 ? (uint8_t)(g[i] ^ mix[i]) : mix[i];
+}
 static void smb_drop(sess_t *ss) {
-    if (ss->smb) { if (ss->fh) smb2_close(ss->smb, ss->fh); ss->fh = NULL; if (ss->smb_up) smb2_disconnect_share(ss->smb); smb2_destroy_context(ss->smb); }
+    if (ss->smb) {
+        if (ss->fh) smb2_close(ss->smb, ss->fh);
+        ss->fh = NULL;
+        if (ss->smb_up) smb2_disconnect_share(ss->smb);
+        pthread_mutex_lock(&g_smb_mu); smb2_destroy_context(ss->smb); pthread_mutex_unlock(&g_smb_mu);
+    }
     ss->smb = NULL; ss->smb_up = 0; ss->stream_open = 0;
 }
 static int smb_up(sess_t *ss) {
     if (ss->smb_up) return 0;
     char share[200], p[900]; if (smb_split(ss, "", share, sizeof share, p, sizeof p)) { ss_why(ss, "smb: the path starts with the share name"); return -1; }
+    pthread_mutex_lock(&g_smb_mu);
     ss->smb = smb2_init_context();
+    if (ss->smb) { uint8_t g[16]; smb_guid(g); smb2_set_client_guid(ss->smb, g); }
+    pthread_mutex_unlock(&g_smb_mu);
     if (!ss->smb) { ss_why(ss, "smb: out of memory"); return -1; }
     smb2_set_timeout(ss->smb, SRC_IO_S);
     smb2_set_security_mode(ss->smb, SMB2_NEGOTIATE_SIGNING_ENABLED);
     smb2_set_user(ss->smb, ss->s.user[0] ? ss->s.user : "guest");
     smb2_set_password(ss->smb, ss->s.user[0] ? ss->s.pass : "");
     char srv[100]; snprintf(srv, sizeof srv, "%s:%d", ss->s.host, ss->s.port);               // libsmb2 takes "host:port"
-    if (smb2_connect_share(ss->smb, srv, share, ss->s.user[0] ? ss->s.user : "guest") < 0) {
+    pthread_mutex_lock(&g_smb_conn_mu);
+    int cr = smb2_connect_share(ss->smb, srv, share, ss->s.user[0] ? ss->s.user : "guest");
+    pthread_mutex_unlock(&g_smb_conn_mu);
+    if (cr < 0) {
         ss_why(ss, "SMB %s:%d share %s: %s", ss->s.host, ss->s.port, share, smb2_get_error(ss->smb)); smb_drop(ss); return -1;
     }
     ss->smb_up = 1;
