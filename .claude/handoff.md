@@ -99,3 +99,40 @@ Blockers / leftovers:
     (SMP uninstall via /api/smp/uninstall refuses MOUS21425 as a "bad title id").
   - PHAT5: a failed PKG Manager DLC try (PPSA28997 Deluxe upgrade, 1 MB) may sit in the PS5 Downloads list.
   - 17:10 I restarted blazingmountd on PHAT5 while np-universal held the claim (my script ignored REFUSED); reported on hub + relay #20434.
+
+## bm-netsrc lane (claude-nyc-main, 28 Oct 2026 ~00:30-01:35) - network sources (FTP/SMB/WebDAV) + console profiles + remote wake
+Working on: Markus's last two PlayBridge-style features in BlazingMount (approved 28 Oct).
+Last action: payload 2.12-520a827 + app 0.8.0 LIVE on PHAT5 and proven with real installs; DIGI5 NOT touched (claim held by another claude-nyc-main agent: MK1 relaunch test).
+Commits (all pushed, main): ac7096d (payload 2.12: bm_src.c, bm_prof.c, host/bm-console.py, tests), 27a2ba8 (app 0.8.0), 520a827 (SMB parallel-session fix), + preview BM_LIVE.
+What exists:
+  - console/blazingmountd/src/bm_src.c: sources in /data/blazing/sources.conf (0600; logins never listed/logged), FTP (PASV/REST/RETR, MLSD else LIST),
+    WebDAV (Range GET, PROPFIND, Basic, http only), SMB2/3 via libsmb2 (pinned 68f1136e, static, tools/build-libsmb2.sh; build.sh runs it; NO_SMB=1 skips).
+    API: GET /api/src, POST /api/src/add|del, GET /api/src/ls|test, POST /api/install?src=&path= (bm_install.c reads the source itself; split X.pkg.N = one file),
+    GET /src/<name>/<path> = Range gateway (a game image from a source; NOT wired to a game build yet).
+  - bm_prof.c: GET /api/profile, POST /api/profile/set (name, install_target auto|internal|m2 -> homebrew_dir, default_source, user) in /data/blazing/profile.conf.
+  - host/bm-console.py (symlink ~/.local/bin/bm-console on the MacBook): state, wake, profile, src list|add|ls|test|del, install. Wake = DDP WAKEUP (UDP 9302) with the
+    Game Lab pairing credential, sent from where the profile lives (this computer or mac2 over ssh); refuses an awake or silent console; never sleeps one.
+  - app 0.8.0: INSTALL tab walks network sources (L2/R2 with the store + drives), folders (CROSS in, CIRCLE up), CROSS on a pkg = confirm -> install with live %/MB/s/ETA/SQUARE cancel;
+    Settings tab has 4 profile rows (name, user = shown; install target + default source = cycled). The profile's default source opens first.
+  - Tests: host/test_netsrc.py (own FTP+WebDAV servers, rclone's if installed, REAL SMB with BM_TEST_SMB=<ip[:port]>:<share/dir> + BM_TEST_SMB_USER/PASS env; 6 parallel SMB sessions),
+    host/test_wake.py (fake console), test_install/test_api/test_store/test_pm/test_pull still pass; app/host/preview.sh (+ BM_LIVE=<console ip> = screens from a real console's API).
+ROOT CAUSES found: (1) libsmb2 on the PS5 has NO strong RNG (config.h) -> random() reseeded per context -> parallel sessions (Sony reads on several connections) got the
+  same client GUID and the server dropped the older ones ("Timeout expired and no connection exists"); fixed: own GUID per session, init/destroy under a lock, one handshake at a time.
+  (2) macOS smbd "guest" does not work with libsmb2 (0xC000006E/6D); the 8TB share needs the login (user blazing, password in mac1 ~/.credentials/game-shares-smb/mac1.pass).
+  (3) mac2's smb-pkg :4446 share (impacket) lists fine but Tools/ links dangle (the Dell 5TB is not mounted) and its listing crashes on them - not our bug.
+Console state: PHAT5 sources mac2-ftp (rclone :8021), mac2-dav (rclone :8077) are TEST sources (rclone on mac2 under ~/bm-netsrc-live, stopped at the end), mac1-8tb = smb login (kept).
+  PHAT5 profile: name PHAT5, target m2 (= homebrew_dir it already had), user Dappa (a label I chose: change it), default source set to mac1-8tb at the end.
+  PS5Library PPSA99051 was reinstalled 4x on PHAT5 (same pkg, same title); one cancelled mid-way (the PS5 Downloads list may show a failed task: delete it there).
+Next step (exact): when DIGI5 is free (ps5-status DIGI5; ps5-claim DIGI5 bm-netsrc "..."):
+  zsh host/deploy-payload.sh DIGI5 ~/.blazing/blazingmountd-2.12-520a827-fork15533a6e.elf bm-netsrc   (fork 15533a6e = DIGI5's current)
+  then the app: python3 -I ~/NYCT/blazing-ps5/tools/put-tree.py DIGI5 ~/NYCT/bm-netsrc-work/app080/PPSA99280 /data/homebrew/PPSA99280 --stage --tid PPSA99280
+  after moving the old folder to /data/blz-stage/backup/PPSA99280-app-0.7.0-<ts> over FTP (:1337 on DIGI5), then ps5-release.
+  Rebuild if needed: zsh host/build-payload-mac2.sh <fork> (builds the COMMITTED HEAD on mac2); app: sh app/ps5/dell-build.sh (zip sha 8b45bf93).
+Untested / not done: LIVE WAKE (both consoles were awake: the code path is proven against a fake console + the real credential lookup on mac2 by --dry-run, but no packet has
+  gone to a resting console - first rest-mode moment: `bm-console wake PHAT5`); app screens not driven on the TV (preview + BM_LIVE shots only); "stream a game image from a source"
+  = only the byte gateway; wake from Blazing Games (a web page cannot send UDP; needs a local helper); WebDAV over https, FTPS, SMB over the tailnet proxy (away from home);
+  the 1500-entry listing cap is silent; /src/<name>/<path> is readable by anything on the LAN that reaches :8094 (like the rest of the API).
+Key files: console/blazingmountd/src/{bm_src.c,bm_prof.c,bm_install.c}, console/blazingmountd/tools/build-libsmb2.sh, host/{bm-console.py,test_netsrc.py,test_wake.py},
+  app/src/bm_app.h, app/fixtures/{src,src-ls,profile}.json.
+Blockers: DIGI5 claim held by another agent (not stale: renewed).
+NOTE: I accidentally printed two SMB passwords (mac1 game-shares-smb + macbook-smb) into my session output on 28 Oct (a bad sed mask); nothing was written to a file or the hub.
