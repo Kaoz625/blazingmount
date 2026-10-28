@@ -64,6 +64,7 @@ struct Rig {
                          : base == "/api/log" ? "log.json" : base == "/api/pm/drives" ? "pm-drives.json" : base == "/api/pm/packages" ? "pm-packages.json"
                          : base == "/api/pm/status" ? (pmBusy ? "pm-status-busy.json" : "pm-status.json") : base == "/api/pm/queue" ? "pm-queue.json"
                          : base == "/api/store" ? (storeBusy ? "store-busy.json" : "store.json")
+                         : base == "/api/src" ? "src.json" : base == "/api/src/ls" ? "src-ls.json" : base == "/api/profile" || base == "/api/profile/set" ? "profile.json"
                          : base == "/api/install" && r.method == "GET" ? (instBusy ? "install-busy.json" : "install.json") : "";
         if (offline || (storeSlow && base == "/api/store")) { app.OnResponse(r.path, 0, ""); continue; }
         if (base == "/api/catalog" || base == "/api/covers.json" || r.path.rfind("/api/cover/", 0) == 0 || base == "/api/discover"
@@ -81,7 +82,7 @@ struct Rig {
           app.OnResponse(r.path, png.empty() ? 404 : 200, png);
           continue;
         }
-        if (r.method == "POST") { app.OnResponse(r.path, 200, "{\"ok\":true}"); continue; }
+        if (r.method == "POST" && base != "/api/profile/set") { app.OnResponse(r.path, 200, "{\"ok\":true}"); continue; }
         std::string body = file.empty() ? "" : Read(dir + "/" + file);
         app.OnResponse(r.path, body.empty() ? 404 : 200, body);
       }
@@ -140,6 +141,10 @@ int main(int argc, char** argv) {
   if (on("34-store-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); for (int i = 0; i < 6; ++i) r.Press(kDown); r.Press(kCross); r.Wait(0.5); bad += Shot(font, r, out + "/34-store-confirm"); }
   if (on("36-store-waiting")) { Rig r; r.dir = fx; r.storeSlow = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); bad += Shot(font, r, out + "/36-store-waiting"); }
   if (on("35-store-installing")) { Rig r; r.dir = fx; r.storeBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(2.5); r.Press(kDown); r.Press(kDown); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/35-store-installing"); }
+  if (on("36-net-source")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kL2); r.Wait(2.5); r.Press(kDown); r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/36-net-source"); }
+  if (on("37-net-install-confirm")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kL2); r.Wait(2.5); for (int i = 0; i < 3; ++i) r.Press(kDown); r.Press(kCross); r.Wait(0.5); bad += Shot(font, r, out + "/37-net-install-confirm"); }
+  if (on("38-net-installing")) { Rig r; r.dir = fx; r.instBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kL2); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/38-net-installing"); }
+  if (on("39-settings-profile")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Press(kR1); r.Press(kR1); r.Wait(1); for (int i = 0; i < 40; ++i) r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/39-settings-profile"); }
   if (on("33-bm-installing")) { Rig r; r.dir = fx; r.instBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/33-bm-installing"); }
   if (on("32-installing")) { Rig r; r.dir = fx; r.pmBusy = true; r.Wait(0); r.Press(kR1); r.Press(kR1); r.Wait(1); r.Press(kR2); r.Wait(2.5); r.t += 5; r.Wait(1); r.Wait(1); bad += Shot(font, r, out + "/32-installing"); }
   if (on("09-settings")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kL1); r.Wait(0.5); for (int i = 0; i < 5; ++i) r.Press(kDown); r.Press(kRight); bad += Shot(font, r, out + "/09-settings"); }

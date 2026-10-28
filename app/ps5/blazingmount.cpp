@@ -31,7 +31,7 @@
 
 class VulkanExample : public VulkanExampleBase
 {
-	static constexpr const char *kVersion = "0.7.0";
+	static constexpr const char *kVersion = "0.8.0";
 	static constexpr int kApiPort = 8094;
 
 	bm::App app;

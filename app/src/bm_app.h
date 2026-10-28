@@ -372,6 +372,33 @@ class App {
       else if (!ok || !v["ok"].truthy()) Toast((cancel ? "Not cancelled: " : "Not installed: ") + v["error"].str());
       else Toast(cancel ? "Install cancelled" : "Installing: the PS5 reads it straight from your drives (no copy first)");
       nextInst_ = 0;
+    } else if (Base(path) == "/api/src") {
+      netTried_ = true; netMissing_ = code == 404;
+      if (!ok) return;
+      const std::string keep = netIdx_ < int(nets_.size()) ? nets_[size_t(netIdx_)].name : "";
+      nets_.clear();
+      for (const auto& j : v["sources"].items) {
+        NetSrc n; n.name = j["name"].str(); n.kind = j["kind"].str(); n.host = j["host"].str(); n.path = j["path"].str(); n.user = j["user"].str();
+        n.port = (int)j["port"].ll(); n.login = j["has_pass"].truthy(); nets_.push_back(std::move(n));
+      }
+      netIdx_ = 0;
+      for (size_t i = 0; i < nets_.size(); ++i) if (nets_[i].name == keep) netIdx_ = int(i);
+      if (nets_.empty()) netOn_ = false;
+      PickDefaultSource();
+    } else if (Base(path) == "/api/src/ls") {
+      if (QueryArg(path, "name") + "|" + QueryArg(path, "path") != NetKey()) return;          // an answer for a folder we already left
+      netFor_ = NetKey(); netEnt_.clear();
+      if (!ok || !v["ok"].truthy()) { netErr_ = ok ? v["error"].str() : std::string("BlazingMount did not answer"); return; }
+      netErr_.clear();
+      for (const auto& j : v["entries"].items) {
+        NetEnt e; e.name = j["name"].str(); e.dir = j["dir"].truthy(); e.pkg = j["pkg"].truthy(); e.image = j["image"].truthy();
+        e.size = j["size"].ll(); e.parts = std::max(1, (int)j["parts"].ll(1)); netEnt_.push_back(std::move(e));
+      }
+      netSel_ = std::clamp(netSel_, 0, std::max(0, int(netEnt_.size()) - 1));
+    } else if (Base(path) == "/api/profile" || Base(path) == "/api/profile/set") {
+      if (ok && v["install_target"].ok()) { profile_ = std::move(v); profTried_ = true; PickDefaultSource(); }
+      else if (Base(path) == "/api/profile/set") Toast("Profile not changed: " + (ok ? v["error"].str() : std::string("BlazingMount did not answer")));
+      nextProf_ = 0;
     } else if (Base(path) == "/api/pm/status") {
       if (ok) pmStatus_ = std::move(v);
     } else if (Base(path) == "/api/pm/queue") {
@@ -443,6 +470,14 @@ class App {
       if (now >= nextPm_ && !Inflight("/api/pm/status") && !Inflight("/api/pm/queue")) { Ask("GET", "/api/pm/status"); Ask("GET", "/api/pm/queue"); nextPm_ = now + 1.0; }
       if (now >= nextInst_ && !Inflight("/api/install")) { Ask("GET", "/api/install"); nextInst_ = now + 1.0; }
     }
+    if (connected_ && tab_ == Tab::kInstall) {                     // network sources + this console's profile (payload 2.12)
+      if (now >= nextNet_ && !Inflight("/api/src")) { Ask("GET", "/api/src"); nextNet_ = now + (netTried_ ? 20.0 : 5.0); }
+      if (!profTried_ && now >= nextProf_ && !Inflight("/api/profile")) { Ask("GET", "/api/profile"); nextProf_ = now + 10.0; }
+      if (netOn_ && !nets_.empty() && !Inflight("/api/src/ls") && (netFor_ != NetKey() || now >= nextLs_)) {
+        Ask("GET", "/api/src/ls?name=" + PathEnc(nets_[size_t(netIdx_)].name) + "&path=" + PathEnc(netPath_)); nextLs_ = now + 30.0;
+      }
+    }
+    if (connected_ && tab_ == Tab::kSettings && now >= nextProf_ && !Inflight("/api/profile")) { Ask("GET", "/api/profile"); nextProf_ = now + 5.0; }
     if (connected_ && tab_ == Tab::kActivity && now >= nextLog_ && !Inflight("/api/log")) { Ask("GET", "/api/log?lines=80"); nextLog_ = now + 2.0; }
   }
   std::vector<Request> TakeRequests() { std::vector<Request> r; r.swap(out_); return r; }
@@ -517,6 +552,16 @@ class App {
   bool storeOn_ = true, storeTried_ = false, storeMissing_ = false, storeWait_ = false;
   int stSel_ = 0, stTop_ = 0;
   double nextStore_ = 0;
+  // ---- NETWORK SOURCES (0.8, payload 2.12 /api/src): FTP / SMB / WebDAV the payload reads itself; browse folders, install a .pkg (/api/install?src=&path=)
+  struct NetSrc { std::string name, kind, host, path, user; int port = 0; bool login = false; };
+  struct NetEnt { std::string name; bool dir = false, pkg = false, image = false; long long size = 0; int parts = 1; };
+  std::vector<NetSrc> nets_;
+  std::vector<NetEnt> netEnt_;
+  json::Value profile_;                                            // this console's profile (payload /api/profile)
+  bool netOn_ = false, netTried_ = false, netMissing_ = false, netPicked_ = false, profTried_ = false;
+  int netIdx_ = 0, netSel_ = 0, netTop_ = 0;
+  std::string netPath_, netErr_, netFor_;                          // the folder shown (relative to the source's base); the last error; "<name>|<path>" the listing is of
+  double nextNet_ = 0, nextLs_ = 0, nextProf_ = 0;
   bool pmTried_ = false, pmDown_ = false, pmPicked_ = false;
   double nextPm_ = 0, nextPmList_ = 0, nextPkgs_ = 0, pmRateAt_ = 0, pmRate_ = 0;
   long long pmRateDone_ = 0;
@@ -767,6 +812,7 @@ class App {
   }
   void PressConfirm(Button b) {
     if (b == kCross && confirm_.action == "store_install") { Ask("POST", "/api/store/install?" + confirm_.tid); confirm_.active = false; return; }
+    if (b == kCross && confirm_.action == "net_install") { Ask("POST", "/api/install?" + confirm_.tid); confirm_.active = false; return; }
     if (b == kCross && confirm_.action == "pm_install") {
       const std::string rel = instHave_ ? ShelfPath(confirm_.tid) : std::string();
       if (!rel.empty()) Ask("POST", "/api/install?path=" + PathEnc(rel) + "&name=" + PathEnc(instName_));   // payload falls back to PKG Manager itself
@@ -800,13 +846,16 @@ class App {
   void PressInstall(Button b) {
     // L2 / R2 (or left / right) walk the sources: the STORE first, then every drive PKG Manager has packages on
     if (b == kLeft || b == kRight || b == kL2 || b == kR2) {
-      const int k = int(pmDrives_.size()) + 1, pos = storeOn_ ? 0 : pmDrive_ + 1;
+      const int nd = int(pmDrives_.size()), k = nd + 1 + int(nets_.size());
+      const int pos = storeOn_ ? 0 : netOn_ ? nd + 1 + netIdx_ : pmDrive_ + 1;
       const int next = (pos + ((b == kRight || b == kR2) ? 1 : k - 1)) % k;
-      storeOn_ = next == 0;
-      if (!storeOn_) { pmDrive_ = next - 1; pmPicked_ = true; pmSel_ = 0; pm_.clear(); } else nextStore_ = 0;
+      storeOn_ = next == 0; netOn_ = next > nd; netPicked_ = true;
+      if (netOn_) { netIdx_ = next - nd - 1; netPath_.clear(); netEnt_.clear(); netFor_.clear(); netErr_.clear(); netSel_ = netTop_ = 0; }
+      else if (!storeOn_) { pmDrive_ = next - 1; pmPicked_ = true; pmSel_ = 0; pm_.clear(); } else nextStore_ = 0;
       return;
     }
     if (storeOn_) { PressStore(b); return; }
+    if (netOn_) { PressNet(b); return; }
     const int n = int(pm_.size());
     if (b == kUp && n) pmSel_ = (pmSel_ + n - 1) % n;
     if (b == kDown && n) pmSel_ = (pmSel_ + 1) % n;
@@ -826,6 +875,51 @@ class App {
       if (k.installed) body += " It is already installed" + (k.installedVersion.empty() ? std::string("") : " (" + k.installedVersion + ")") + ".";
       confirm_ = {true, "pm_install", k.path, "Install " + k.title + "?", body, "Install", "", ""};
     }
+  }
+  // a network source: the key of the folder shown, the way the answers name it (encoded)
+  std::string NetKey() const { return netIdx_ < int(nets_.size()) ? PathEnc(nets_[size_t(netIdx_)].name) + "|" + PathEnc(netPath_) : std::string(); }
+  void PickDefaultSource() {                                        // the profile's default source opens first, once per start (until a source was chosen by hand)
+    if (netPicked_ || !profTried_ || !netTried_ || pmPicked_) return;
+    const std::string want = profile_["default_source"].str();
+    if (want.empty()) { netPicked_ = true; return; }
+    for (size_t i = 0; i < nets_.size(); ++i) if (nets_[i].name == want) { netIdx_ = int(i); netOn_ = true; storeOn_ = false; netPicked_ = true; netFor_.clear(); netPath_.clear(); return; }
+  }
+  std::string NetShown(const NetSrc& s) const {                    // "/base/folder/..." without doubled slashes
+    std::string base = s.path; while (!base.empty() && base[0] == '/') base.erase(0, 1);
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    return "/" + base + (netPath_.empty() ? std::string() : (base.empty() ? "" : "/") + netPath_);
+  }
+  static std::string KindName(const std::string& k) { return k == "ftp" ? "FTP" : k == "smb" ? "SMB" : k == "webdav" ? "WebDAV" : k; }
+  void PressNet(Button b) {
+    const int n = int(netEnt_.size());
+    if (b == kUp && n) netSel_ = (netSel_ + n - 1) % n;
+    if (b == kDown && n) netSel_ = (netSel_ + 1) % n;
+    if (b == kTriangle) { netFor_.clear(); nextLs_ = 0; }
+    if (b == kSquare && InstBusy()) Ask("POST", "/api/install/cancel");
+    if (b == kCircle && !netPath_.empty()) {                         // one folder up
+      const auto sl = netPath_.rfind('/');
+      netPath_ = sl == std::string::npos ? std::string() : netPath_.substr(0, sl);
+      netEnt_.clear(); netFor_.clear(); netSel_ = netTop_ = 0; netErr_.clear();
+      return;
+    }
+    if (b != kCross || netSel_ >= n || netIdx_ >= int(nets_.size())) return;
+    const NetEnt& e = netEnt_[size_t(netSel_)];
+    if (e.dir) { netPath_ += (netPath_.empty() ? "" : "/") + e.name; netEnt_.clear(); netFor_.clear(); netSel_ = netTop_ = 0; netErr_.clear(); return; }
+    if (!e.pkg) {
+      Toast(e.image ? "A game image from this source: the payload serves it at :8094/src/" + nets_[size_t(netIdx_)].name + "/... (building a game from a source is not wired yet)"
+                    : "Only .pkg files can be installed");
+      return;
+    }
+    if (PmBusy() || InstBusy()) { Toast("One install at a time: wait for this one, or {SQUARE} to cancel it"); return; }
+    const NetSrc& s = nets_[size_t(netIdx_)];
+    std::string stem = e.name; if (stem.size() > 4 && Lower(stem.substr(stem.size() - 4)) == ".pkg") stem.resize(stem.size() - 4);
+    instName_ = stem;
+    const std::string rel = netPath_.empty() ? e.name : netPath_ + "/" + e.name;
+    const json::Value& fm = status_["free_mb"];
+    std::string body = "Package, " + Gb(e.size) + (e.parts > 1 ? " in " + std::to_string(e.parts) + " parts" : "") + ", from " + KindName(s.kind) + " " + s.host +
+                       ". The PS5 installer reads it straight from there through BlazingMount: nothing is copied to the console first, so it needs " + Gb(e.size) +
+                       " on the console. Free now: " + FreeText(fm["ext1"].ll(-1) > 0 ? fm["ext1"].ll() : fm["data"].ll(-1)) + ".";
+    confirm_ = {true, "net_install", "src=" + PathEnc(s.name) + "&path=" + PathEnc(rel) + "&name=" + PathEnc(stem), "Install " + stem + "?", body, "Install", "", ""};
   }
   void PressStore(Button b) {
     const int n = int(store_.size());
@@ -894,9 +988,7 @@ class App {
     }
     b.Text(x0 + 32, kBottom - 52, "{CROSS} Install   {TRIANGLE} Look again", St(kMeta, c::kTextDim));
   }
-  void DrawInstall(Batch& b) {
-    const float listR = 1150;
-    if (storeOn_) { DrawStore(b, listR); return; }
+  void DrawPmList(Batch& b, float listR) {
     // the drive: L2 / R2 (or left / right) walk the drives PKG Manager has packages on
     std::string dl = pmDrives_.empty() ? std::string(pmDown_ ? "PKG Manager is not running on this console" : pmTried_ ? "No drive with packages" : "Looking at your drives...")
                                        : pmDrives_[size_t(pmDrive_)].label + "  \xC2\xB7  " + std::to_string(pmDrives_[size_t(pmDrive_)].count) + " packages";
@@ -924,6 +1016,35 @@ class App {
                          (!k.canInstall && !same && !k.why.empty() ? "  \xC2\xB7  " + k.why : "");
       b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
     }
+  }
+  void DrawNetList(Batch& b, float listR) {
+    const NetSrc* s = netIdx_ < int(nets_.size()) ? &nets_[size_t(netIdx_)] : nullptr;
+    std::string head = !s ? std::string(netMissing_ ? "Network sources need BlazingMount 2.12 on this console" : "No network source yet")
+                          : s->name + "  \xC2\xB7  " + KindName(s->kind) + " " + s->host + "  \xC2\xB7  " + NetShown(*s);
+    b.Text(kGutter, 140, Fit(b, head, St(kBody, c::kTextHi), listR - kGutter - 200).c_str(), St(kBody, c::kTextHi));
+    b.Text(listR, 144, "{L2} {R2} source", St(kMeta, c::kTextDim), Align::kRight);
+    const float top = 200, rowH = 88, gap = 8; const int vis = 8;
+    if (s && netFor_ != NetKey()) b.Text(kGutter, top + 20, ("Looking at " + s->name + "...").c_str(), St(kMeta, c::kTextDim));
+    else if (!netErr_.empty()) Wrap(b, kGutter, top + 20, listR - kGutter - 24, "Could not read it: " + netErr_, St(kMeta, c::kAccent, -0.03f), 3, 36);
+    else if (netEnt_.empty()) b.Text(kGutter, top + 20, s ? "No folders or packages here." : "Add one from a computer: bm-console.py src <console> add ...", St(kMeta, c::kTextDim));
+    netTop_ = std::clamp(netTop_, std::max(0, netSel_ - vis + 1), netSel_);
+    for (int i = 0; i < vis && netTop_ + i < int(netEnt_.size()); ++i) {
+      const int idx = netTop_ + i; const NetEnt& e = netEnt_[size_t(idx)]; const bool f = idx == netSel_;
+      const float y0 = top + i * (rowH + gap), y1 = y0 + rowH;
+      if (f) Round(b, kGutter, y0, listR, y1, 16, c::kFocusFill);
+      const Rgba under = f ? c::kFocusFill : c::kBg;
+      const char* badge = e.dir ? "FOLDER" : e.pkg ? "INSTALL" : e.image ? "IMAGE" : "FILE";
+      const float pl = Pill(b, listR - 16, (y0 + y1) / 2, badge, f ? 0 : (e.pkg ? 0 : 1), under);
+      const float tx = kGutter + 24, tw = pl - 20 - tx;
+      b.Text(tx, y0 + 9, Fit(b, e.name, St(kBody, f ? c::kTextHi : c::kText), tw).c_str(), St(kBody, f ? c::kTextHi : c::kText));
+      const std::string meta = e.dir ? std::string("folder") : Gb(e.size) + (e.parts > 1 ? "  \xC2\xB7  " + std::to_string(e.parts) + " parts" : "");
+      b.Text(tx, y0 + 48, Fit(b, meta, St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f), tw).c_str(), St(kMeta - 2, f ? c::kTextHi : c::kTextDim, -0.03f));
+    }
+  }
+  void DrawInstall(Batch& b) {
+    const float listR = 1150;
+    if (storeOn_) { DrawStore(b, listR); return; }
+    if (netOn_) DrawNetList(b, listR); else DrawPmList(b, listR);
     // right: what is installing now, live from PKG Manager
     const float x0 = listR + 40, x1 = kEdge;
     Round(b, x0, 140, x1, kBottom, 16, c::kSurface);
@@ -988,7 +1109,7 @@ class App {
       std::string line = j["title_name"].str() + ": " + (st == "canceled" && !err.empty() ? err : st);
       y = Wrap(b, x0 + 32, y, x1 - x0 - 64, line, St(kMeta - 2, st == "failed" ? c::kAccent : c::kText, -0.03f), 2, 32) + 10;
     }
-    b.Text(x0 + 32, kBottom - 52, "{CROSS} Install   {TRIANGLE} Look again", St(kMeta, c::kTextDim));
+    b.Text(x0 + 32, kBottom - 52, netOn_ ? "{CROSS} Open / Install   {CIRCLE} Back   {TRIANGLE} Look again" : "{CROSS} Install   {TRIANGLE} Look again", St(kMeta, c::kTextDim));
   }
 
   void PressActivity(Button b) {
@@ -996,12 +1117,31 @@ class App {
     if (b == kDown) logScroll_ = std::max(0, logScroll_ - 1);
     if (b == kCross) { Act("sync", ""); Toast("Checking the drives now"); }
   }
+  // this console's profile (payload /api/profile): rows name, user (shown; set them with bm-console.py profile), install target, default source (cycled here)
+  void PressProfile(int row, Button b) {
+    if (!profTried_) { Toast("Reading this console's profile..."); return; }
+    if (row < 2) { if (b == kCross) Toast(row == 0 ? "The name is set from a computer: bm-console.py profile <console> set --name ..." : "The user is set from a computer: bm-console.py profile <console> set --user ..."); return; }
+    if (b != kCross && b != kLeft && b != kRight) return;
+    const int dir = b == kLeft ? -1 : 1;
+    if (row == 2) {
+      static const char* t[] = {"auto", "internal", "m2"};
+      int i = 0; for (int k = 0; k < 3; ++k) if (profile_["install_target"].str() == t[k]) i = k;
+      Ask("POST", std::string("/api/profile/set?install_target=") + t[(i + 3 + dir) % 3]);
+    } else {
+      std::vector<std::string> opts{""}; for (const auto& n : nets_) opts.push_back(n.name);
+      int i = 0; for (size_t k = 0; k < opts.size(); ++k) if (opts[k] == profile_["default_source"].str()) i = int(k);
+      const int m = int(opts.size());
+      Ask("POST", "/api/profile/set?default_source=" + PathEnc(opts[size_t((i + m + dir) % m)]));
+    }
+  }
   void PressSettings(Button b) {
-    const int n = 2 + int(settings_.size());   // row 0: new games, row 1: check now, then the keys
+    const int n = 2 + int(settings_.size()) + 4;   // row 0: new games, row 1: check now, then the keys, then this console's profile (4 rows)
     if (b == kUp && setSel_ > 0) --setSel_;
     if (b == kDown && setSel_ + 1 < n) ++setSel_;
     if (setSel_ == 0 && (b == kCross || b == kLeft || b == kRight)) { Act("auto", "", std::string("&value=") + (auto_ ? "0" : "1")); auto_ = !auto_; return; }
     if (setSel_ == 1 && b == kCross) { Act("sync", ""); Toast("Checking the drives now"); return; }
+    const int pr = setSel_ - 2 - int(settings_.size());
+    if (pr >= 0) { PressProfile(pr, b); return; }
     if (setSel_ < 2 || setSel_ - 2 >= int(settings_.size())) return;
     Setting& s = settings_[size_t(setSel_ - 2)];
     if (s.type == "b" && (b == kCross || b == kLeft || b == kRight)) {
@@ -1642,6 +1782,18 @@ class App {
       }
       ++i;
     }
+    // this console's profile (stored on the console; the same one bm-console.py edits)
+    const std::string tgt = profile_["install_target"].str(), src = profile_["default_source"].str();
+    const char* tname = tgt == "internal" ? "Console storage" : tgt == "m2" ? "M.2 drive" : "Leave as it is";
+    if (vis(i)) row(i, "Console profile: name", "What this console is called in the tools; set it from a computer (bm-console.py profile)", !profTried_ ? "..." : profile_["name"].str().empty() ? "(none)" : profile_["name"].str(), c::kTextDim);
+    ++i;
+    if (vis(i)) row(i, "Console profile: user", "The PS5 user your installs are for (a label); set it from a computer", !profTried_ ? "..." : profile_["user"].str().empty() ? "(none)" : profile_["user"].str(), c::kTextDim);
+    ++i;
+    if (vis(i)) row(i, "Console profile: install target", "Where new starters go: console storage (/data/homebrew) or the M.2 (/mnt/ext1/homebrew). PKGs go where the PS5's own Storage setting says.",
+                    !profTried_ ? "..." : std::string("{4} ") + tname + " {6}", c::kGood);
+    ++i;
+    if (vis(i)) row(i, "Console profile: default source", "The network source the Install tab opens first (add sources with bm-console.py src)", !profTried_ ? "..." : std::string("{4} ") + (src.empty() ? std::string("The store") : src) + " {6}", c::kGood);
+    ++i;
   }
 
   // ---------------------------------------------------------------- overlays

@@ -1,0 +1,8 @@
+{"ok":true,"src":"mac2-dav","path":"","ms":40,"entries":[
+{"name":"Homebrew","dir":true,"size":0,"parts":1,"pkg":false,"image":false},
+{"name":"Games","dir":true,"size":0,"parts":1,"pkg":false,"image":false},
+{"name":"PS5-SHOP-APPKG.pkg","dir":false,"size":22034961,"parts":1,"pkg":true,"image":false},
+{"name":"PS5Library-0.2.54.pkg","dir":false,"size":51155852,"parts":1,"pkg":true,"image":false},
+{"name":"Spectrum Library 1.4.7 Native.pkg","dir":false,"size":101869367,"parts":1,"pkg":true,"image":false},
+{"name":"Midnight Club 2 PSN.pkg","dir":false,"size":3891000000,"parts":3,"pkg":true,"image":false},
+{"name":"Cloudberry Kingdom (PPSA10120).ffpfsc","dir":false,"size":647823360,"parts":1,"pkg":false,"image":true}]}
