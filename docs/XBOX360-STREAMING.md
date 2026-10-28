@@ -1,6 +1,6 @@
 # Xbox 360 games streamed from the drives (PS5X360) — plan
 
-Status: **plan, waiting for Markus's OK** (28 Oct 2026). Nothing built, nothing on a console.
+Status: **Markus chose A (28 Oct 2026)**. Research done (below); nothing built, nothing on a console yet.
 
 Markus, 28 Oct: games on PHAT5's M.2 "now, then build a streaming network". The 10 games went to
 `/mnt/ext1/xbox360` (roku channels `tools/ps5/x360-to-phat5.py`). This is the "then": every Xbox 360
@@ -52,3 +52,25 @@ PS5X360 updates make the copy a chore.
 One ISO game (MK vs DC) and one extracted game (BlazBlue CSE) load AND are played on PHAT5 streamed,
 with the M.2 copy moved aside (not deleted), imgserve/dirserve logs showing the 206 range reads, then
 DIGI5. Per the payload rule, the plan line goes to Markus before any build reaches a console.
+
+## Research for A (28 Oct 2026)
+
+- PS5X360 1.0.2 `eboot.bin` is a fake-signed SELF; `decrypt_fself.py` (ps5-linux tools/backport) turns it into an ELF.
+- Its `DT_SCE_NEEDED_MODULE` list (read with blazing-fighters `mkbackport.py`'s ELF reader): libSceAgc, libSceAgcDriver,
+  libSceAudioOut, libSceLibcInternal, libSceNet, libScePad, libScePosixForWebKit, libSceSystemService,
+  libSceUserService, libSceVideoOut, libkernel, libkernel_sys. It ships its own `sce_module/libc.prx` (needs
+  libSceLibcInternal, libSceSysmodule, libkernel).
+- **No libSceAmpr**: a starter that only adds `fakelib/libSceAmpr.sprx` would never load the link. The starter's eboot
+  copy must NEED libSceAmpr: add a `DT_SCE_NEEDED_MODULE` + `DT_SCE_IMPORT_LIB` pair, then `make_fself.py` (the same
+  steps mkbackport already does to every backported eboot).
+
+## Build steps (A)
+
+1. `host/x360-starter.py`: copy PS5X360's eboot, sce_module and sce_sys into a new title ID; add the libSceAmpr NEEDED
+   pair; re-sign; `fakelib/libSceAmpr.sprx` = the link fork. Host test: re-decrypt and list the new NEEDED set.
+2. Check the link module's hooks work in a process that never calls AMPR. They are libkernel slot hooks, installed at
+   module_start; confirm with the hook-slot klog line (`open=1 ... pread=1`).
+3. Link config: placeholder → dirserve URL, `/mnt/ext1/xbox360-stream/<Title>/...` (a second library root added in
+   PS5X360's Game folders), with real sizes in the index.
+4. Console proof on PHAT5 (claim, idle, never during his game): MK vs DC (ISO) + BlazBlue CSE (extracted) played streamed.
+5. blazingmountd builds and refreshes it like the PS5 starters. Then DIGI5.
