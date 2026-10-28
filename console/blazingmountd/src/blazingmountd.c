@@ -328,10 +328,10 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   tsnet 1 | proxy 127.0.0.1 18888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
 //                        (/data/tailscale/config.json with "httpProxyAddr", or an explicit proxy line) the payload's own downloads AND every
 //                        game's link cfg fall back to that proxy when the LAN server does not answer (tsnet 0 = never)
-//   conns 12 | readahead_kb 2048 | cache_mb_ram 64       link speed settings written into every game's cfg. 27 Oct (Markus: "any game any
+//   conns 16 | readahead_kb 2048 | cache_mb_ram 64       link speed settings written into every game's cfg. 27 Oct (Markus: "any game any
 //                        time a console is using a slower connection"): the link (>= e20eb10) grows its read-ahead by itself with the
 //                        measured request time (up to 8x, at most a quarter of the RAM cache) and takes up to 16 connections, so the
-//                        defaults went 8 -> 12 conns and 32 -> 64 MB cache (16 MB of read-ahead on Wi-Fi or the away tunnel).
+//                        defaults went 8 -> 16 conns and 32 -> 64 MB cache (16 MB of read-ahead on Wi-Fi or the away tunnel).
 //   disk_cache_mb 0      the link's console-disk cache per game, a FIXED cap (the link never grows past it). Default 0 = off (Markus
 //                        24 Oct: no console cache that grows; must work on consoles with no M.2 and little space). When set, it is used
 //                        only while /data has >= big_free_mb free and the cap still leaves min_free_mb; otherwise that game gets 0.
@@ -343,7 +343,7 @@ static void read_conf(conf_t *c) {
     strcpy(c->host, BM_DEFAULT_HOST); c->port = BM_DEFAULT_PORT;
     c->max_starter_mb = 2048; c->min_free_mb = 50 * 1024; c->poll_secs = 600;
     c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
-    c->disk_cache_mb = 0; c->conns = 12; c->readahead_kb = 2048; c->cache_mb_ram = 64;
+    c->disk_cache_mb = 0; c->conns = 16; c->readahead_kb = 2048; c->cache_mb_ram = 64;
     strcpy(c->smp_version, BM_SMP_VERSION);
     strcpy(c->homebrew_dir, HOMEBREW_DIR);
     c->auto_update = 1;
@@ -912,17 +912,20 @@ static int mem_has(const char *b, size_t n, const char *needle) {
     return 0;
 }
 
-// The link settings this payload manages in ANY streaming starter's cfg: conns, readahead_kb, proxy, server_ts (the file list, base,
-// cache and trace lines stay as they are: a hand-made or backported starter keeps its own). Returns a malloc'd new cfg text, or NULL
-// when nothing would change.
+// The link settings this payload manages in ANY streaming starter's cfg: conns, readahead_kb, proxy, server_ts, and cache_mb only
+// UPWARDS to cache_mb_ram (2.11: the link's adaptive read-ahead is capped at a quarter of the RAM cache, so an old 32 MB cache would
+// hold a slow link at 8 MB in flight; a bigger hand-chosen cache is kept). The file list, base and trace lines stay as they are: a
+// hand-made or backported starter keeps its own. Returns a malloc'd new cfg text, or NULL when nothing would change.
 static char *patched_cfg(const conf_t *c, const char *old, size_t olen) {
     size_t cap = olen + 512; char *o = malloc(cap); size_t n = 0;
     const char *p = old, *end = old + olen;
+    int raise_cache = 0;
     while (p < end) {
         const char *e = memchr(p, '\n', (size_t)(end - p)); if (!e) e = end;
         size_t L = (size_t)(e - p);
         int drop = (L >= 6 && !strncmp(p, "conns ", 6)) || (L >= 13 && !strncmp(p, "readahead_kb ", 13)) ||
                    (L >= 6 && !strncmp(p, "proxy ", 6)) || (L >= 10 && !strncmp(p, "server_ts ", 10));
+        if (L >= 9 && !strncmp(p, "cache_mb ", 9) && c->cache_mb_ram > 0 && atoi(p + 9) < c->cache_mb_ram) { drop = 1; raise_cache = 1; }
         if (!drop) {
             memcpy(o + n, p, L); n += L; o[n++] = '\n';
             if (L >= 7 && !strncmp(p, "server ", 7) && g_px_port && g_ts_port)
@@ -932,6 +935,7 @@ static char *patched_cfg(const conf_t *c, const char *old, size_t olen) {
     }
     n += (size_t)snprintf(o + n, cap - n, "conns %d\n", c->conns);
     if (c->readahead_kb > 0) n += (size_t)snprintf(o + n, cap - n, "readahead_kb %d\n", c->readahead_kb);
+    if (raise_cache) n += (size_t)snprintf(o + n, cap - n, "cache_mb %d\n", c->cache_mb_ram);
     o[n] = 0;
     // same settings (in any order) = no change: compare as sorted sets of the managed lines
     size_t on = 0, nn = 0; char ob[2048] = "", nb[2048] = "";
@@ -941,7 +945,7 @@ static char *patched_cfg(const conf_t *c, const char *old, size_t olen) {
             const char *e = memchr(q, '\n', (size_t)(qe - q)); if (!e) e = qe;
             size_t L = (size_t)(e - q);
             if (((L >= 6 && (!strncmp(q, "conns ", 6) || !strncmp(q, "proxy ", 6))) || (L >= 13 && !strncmp(q, "readahead_kb ", 13)) ||
-                 (L >= 10 && !strncmp(q, "server_ts ", 10))) && *dn + L + 2 < 2048) { memcpy(dst + *dn, q, L); *dn += L; dst[(*dn)++] = '|'; dst[*dn] = 0; }
+                 (L >= 10 && !strncmp(q, "server_ts ", 10)) || (L >= 9 && !strncmp(q, "cache_mb ", 9))) && *dn + L + 2 < 2048) { memcpy(dst + *dn, q, L); *dn += L; dst[(*dn)++] = '|'; dst[*dn] = 0; }
             q = e < qe ? e + 1 : qe;
         }
     }

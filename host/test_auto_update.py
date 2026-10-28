@@ -76,8 +76,9 @@ def main():
         new_cfg = open(cfgp).read()
         check(sha(os.path.join(sdir, "fakelib", "libSceAmpr.sprx")) == sha(a.new_fork), "after close: fork replaced with NEW's")
         check(os.stat(os.path.join(sdir, "fakelib", "libSceAmpr.sprx")).st_mode & 0o111 != 0, "new fork keeps its execute bit")
-        check("conns 12" in new_cfg and "conns 4" not in new_cfg and "\nproxy 127.0.0.1 8888\nserver_ts 100.104.191.30 4451\n" in new_cfg,
-              "cfg: conns 12 (default since 2.11) + tsnet lines after server")
+        check("conns 16" in new_cfg and "conns 4" not in new_cfg and "\nproxy 127.0.0.1 8888\nserver_ts 100.104.191.30 4451\n" in new_cfg,
+              "cfg: conns 16 (default since 2.11) + tsnet lines after server")
+        check("cache_mb 64" in new_cfg and "cache_mb 32" not in new_cfg, "cfg: a 32 MB cache is raised to cache_mb_ram 64 (2.11)")
         check([l for l in new_cfg.splitlines() if l.startswith("file ")] == old_files, "cfg file lines unchanged (%d)" % len(old_files))
         check(tree(full) == full_before, "full copy with our fork untouched")
         # pinned starter
