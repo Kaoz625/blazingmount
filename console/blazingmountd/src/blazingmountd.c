@@ -328,7 +328,10 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //   tsnet 1 | proxy 127.0.0.1 18888 | server_ts 100.104.191.30 4451   away from home: when the PS5 tsnet payload is installed
 //                        (/data/tailscale/config.json with "httpProxyAddr", or an explicit proxy line) the payload's own downloads AND every
 //                        game's link cfg fall back to that proxy when the LAN server does not answer (tsnet 0 = never)
-//   conns 8 | readahead_kb 2048 | cache_mb_ram 32        link speed settings written into every game's cfg (= mkgame 24 Oct)
+//   conns 12 | readahead_kb 2048 | cache_mb_ram 64       link speed settings written into every game's cfg. 27 Oct (Markus: "any game any
+//                        time a console is using a slower connection"): the link (>= e20eb10) grows its read-ahead by itself with the
+//                        measured request time (up to 8x, at most a quarter of the RAM cache) and takes up to 16 connections, so the
+//                        defaults went 8 -> 12 conns and 32 -> 64 MB cache (16 MB of read-ahead on Wi-Fi or the away tunnel).
 //   disk_cache_mb 0      the link's console-disk cache per game, a FIXED cap (the link never grows past it). Default 0 = off (Markus
 //                        24 Oct: no console cache that grows; must work on consoles with no M.2 and little space). When set, it is used
 //                        only while /data has >= big_free_mb free and the cap still leaves min_free_mb; otherwise that game gets 0.
@@ -340,7 +343,7 @@ static void read_conf(conf_t *c) {
     strcpy(c->host, BM_DEFAULT_HOST); c->port = BM_DEFAULT_PORT;
     c->max_starter_mb = 2048; c->min_free_mb = 50 * 1024; c->poll_secs = 600;
     c->big_starter_mb = 12000; c->big_free_mb = 200 * 1024;
-    c->disk_cache_mb = 0; c->conns = 8; c->readahead_kb = 2048; c->cache_mb_ram = 32;
+    c->disk_cache_mb = 0; c->conns = 12; c->readahead_kb = 2048; c->cache_mb_ram = 64;
     strcpy(c->smp_version, BM_SMP_VERSION);
     strcpy(c->homebrew_dir, HOMEBREW_DIR);
     c->auto_update = 1;
