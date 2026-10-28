@@ -74,3 +74,19 @@ that the builders reuse (sizes/index/stub logic). You don't call them directly;
 cfg — the installer overrides this with `--host-ip`, so it only matters if you build cfgs by
 hand). Point them at your own paths. The backport-related constants are unused on the native
 path this tool uses (it refuses a game that needs newer firmware than the console).
+
+## Network sources, console profiles, remote wake (blazingmountd 2.12)
+
+```sh
+python3 host/bm-console.py state                         # PHAT5 / DIGI5: awake, rest mode or silent (discovery only - never wakes)
+python3 host/bm-console.py wake DIGI5                    # a console in REST MODE: the Remote Play wake packet; refuses an awake/silent one
+python3 host/bm-console.py profile PHAT5 set --target m2 --source mac1-ftp --user Peace_Maker --name PHAT5
+python3 host/bm-console.py src PHAT5 add mac1-ftp ftp 192.168.1.130:2121 /pkgs --user u --pass-env MY_FTP_PW
+python3 host/bm-console.py src PHAT5 ls mac1-ftp          # browse; split X.pkg.N sets show as ONE X.pkg
+python3 host/bm-console.py install PHAT5 mac1-ftp "Apps/Cool App.pkg"     # live %, MB/s, ETA; Ctrl-C cancels
+```
+
+A source is FTP (`/dir`), SMB (`share[/dir]`) or WebDAV (`/dav`, plain http); the payload reads the bytes itself and hands Sony's installer the
+127.0.0.1 proxy, so nothing is copied to the console first. The login is saved ON THE CONSOLE in `/data/blazing/sources.conf` (mode 0600) and is
+never listed, logged or committed. `GET /src/<name>/<path>` on :8094 is a Range gateway to a source's file (a game image from FTP/SMB/WebDAV).
+Tests: `test_netsrc.py` (our own FTP + WebDAV servers, rclone's if installed, a real SMB share via `BM_TEST_SMB`), `test_wake.py` (fake console).

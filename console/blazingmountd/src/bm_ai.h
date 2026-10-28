@@ -116,9 +116,12 @@ static int ai_bring_up(void) {
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <fcntl.h>
+#include <unistd.h>
 static struct { char uri[256], status[16], cid[48]; long long got, total; int err, used; } g_fake;
 static pthread_mutex_t g_fake_mu = PTHREAD_MUTEX_INITIALIZER;
 static int fake_wr(int s, const char *b, size_t n) { while (n) { ssize_t w = write(s, b, n); if (w <= 0) return -1; b += w; n -= (size_t)w; } return 0; }
+static int g_fake_dump = -1;                                     // BM_FAKE_AI_DUMP=<file>: what the "installer" read, written at its offsets (the tests compare it)
 static long long fake_range(int s, int port, const char *path, long long a, long long b, long long *total) {
     char req[400]; int rl = snprintf(req, sizeof req, "GET %s?product=0284&serverIpAddr=127.0.0.1&r=00000000 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nRange: bytes=%lld-%lld\r\n\r\n", path, port, a, b);   // the query Sony's installer adds
     if (fake_wr(s, req, (size_t)rl)) return -1;
@@ -128,7 +131,8 @@ static long long fake_range(int s, int port, const char *path, long long a, long
     char *cl = strcasestr(h, "\nContent-Length: "), *cr = strcasestr(h, "\nContent-Range: bytes ");
     long long want = cl ? atoll(cl + 17) : -1, ra, rb; if (cr) sscanf(cr + 22, "%lld-%lld/%lld", &ra, &rb, total);
     long long got = (long long)(have - (size_t)(e + 4 - h)); char buf[65536];
-    while (got < want) { ssize_t n = read(s, buf, sizeof buf); if (n <= 0) return -1; got += n; }
+    if (g_fake_dump >= 0 && got > 0 && pwrite(g_fake_dump, e + 4, (size_t)got, (off_t)a) != (ssize_t)got) return -1;
+    while (got < want) { ssize_t n = read(s, buf, sizeof buf); if (n <= 0) return -1; if (g_fake_dump >= 0 && pwrite(g_fake_dump, buf, (size_t)n, (off_t)(a + got)) != n) return -1; got += n; }
     return got;
 }
 static void *fake_sony(void *arg) {
@@ -136,6 +140,7 @@ static void *fake_sony(void *arg) {
     int port = 0; char path[200] = "";
     sscanf(g_fake.uri, "http://127.0.0.1:%d%199s", &port, path);
     int delay = getenv("BM_FAKE_AI_DELAY_MS") ? atoi(getenv("BM_FAKE_AI_DELAY_MS")) : 0;
+    if (getenv("BM_FAKE_AI_DUMP")) g_fake_dump = open(getenv("BM_FAKE_AI_DUMP"), O_WRONLY | O_CREAT | O_TRUNC, 0600);
     int s = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in a; memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_port = htons((unsigned short)port); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     long long total = -1, n = (s < 0 || connect(s, (struct sockaddr *)&a, sizeof a)) ? -1 : fake_range(s, port, path, 0, 65535, &total);
@@ -147,6 +152,7 @@ static void *fake_sony(void *arg) {
         if (n > 0) { pthread_mutex_lock(&g_fake_mu); g_fake.got += n; pthread_mutex_unlock(&g_fake_mu); }
     }
     if (s >= 0) close(s);
+    if (g_fake_dump >= 0) { close(g_fake_dump); g_fake_dump = -1; }
     pthread_mutex_lock(&g_fake_mu);
     const char *mode = getenv("BM_FAKE_AI") ? getenv("BM_FAKE_AI") : "";
     if (n <= 0) { snprintf(g_fake.status, sizeof g_fake.status, "error"); g_fake.err = (int)0x80B2111Eu; }   // a read failed (a cancel)

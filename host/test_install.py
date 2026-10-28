@@ -97,12 +97,13 @@ def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 
-def build(tmp, aport, iport, pport, ipc):
+def build(tmp, aport, iport, pport, ipc, smb=None):   # smb = the host libsmb2 prefix: SMB sources built in (test_netsrc.py)
     exe, helper = os.path.join(tmp, "bmd-%d" % aport), os.path.join(tmp, "helper-%d" % aport)
     for out, src, extra in ((exe, "blazingmountd.c", ['-DBM_VERSION="install-test"', "-DBM_API_PORT=%d" % aport, "-DBM_PM_PORT=%d" % pport,
                                                       "-DINST_STALL_S=4", "-I" + OUT]), (helper, "bm_inst_helper.c", [])):
         r = subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-std=gnu11", "-DBM_INST_PORT=%d" % iport, "-DBM_INST_IPC=%d" % ipc] + extra
-                           + ["-o", out, os.path.join(SRC, src), "-lpthread"], capture_output=True, text=True)
+                           + (["-DBM_HAVE_SMB2", "-I" + os.path.join(smb, "include")] if smb and src == "blazingmountd.c" else [])
+                           + ["-o", out, os.path.join(SRC, src)] + ([os.path.join(smb, "lib", "libsmb2.a")] if smb and src == "blazingmountd.c" else []) + ["-lpthread"], capture_output=True, text=True)
         if r.returncode or r.stderr.strip():
             print(r.stderr); sys.exit("build failed or warned: " + src)
     return exe, helper

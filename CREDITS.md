@@ -14,6 +14,7 @@ them and records the license position. The pre-release checklist at the bottom i
 | **ps-neighborhood** `PS5PKGTool.Ffpfsc` / `Ufs2` | imgserve's on-demand `.ffpfsc` + exFAT/UFS2 decoder. **External build dependency — not vendored**; obtain a checkout and set `FFPFSC_SRC` (dirserve for game *folders* needs none of this). | build (imgserve) | **GPL-3.0** |
 | **PS5 payload SDK** | builds the link fork and `blazingmountd`. Referenced by the build scripts; not vendored. | build | its own terms |
 | **PKG Manager** (itsPLK/ps5-pkg-manager) | the install FALLBACK: `blazingmountd` passes a drive pkg to the PKG Manager already running on the console (`/api/pm/*`, `bm_install.c`). Its ARCHITECTURE.md documents the public AppInstUtil structure layouts that `bm_install.c` also uses (our own code calls Sony's installer). External, not vendored. | runtime + reference | **GPL-3.0** |
+| **libsmb2** (sahlberg/libsmb2, commit 68f1136e) | the SMB2/3 client behind blazingmountd's SMB network sources (`bm_src.c`) | built from the pinned GitHub archive (sha256-checked) by `console/blazingmountd/tools/build-libsmb2.sh` and linked **statically** into the payload; not vendored. The same revision PKG Manager runs on the PS5. | **LGPL-2.1-or-later** (combined work GPL-3.0) |
 
 > **Attribution note for packagers:** when you distribute a *built* `libSceAmpr.sprx`, you are
 > distributing a GPL-3 binary and must provide its complete corresponding source (our

@@ -1025,6 +1025,8 @@ static void api_smp(int s, const char *method, const char *target, const char *q
 }
 
 static void reply(int s, int code, const char *ctype, const char *body, size_t n);   // below
+#include "bm_src.c"                // v2.12: network sources: FTP, SMB, WebDAV (GET/POST /api/src/*, GET /src/<name>/<path>); installs read them
+#include "bm_prof.c"               // v2.12: this console's profile (GET /api/profile, POST /api/profile/set)
 #include "bm_install.c"            // v2.10: BlazingMount installs a PKG itself from the host (GET/POST /api/install, /cancel, /pkgs)
 #include "bm_store.c"              // v2.9: the homebrew store (GET /api/store, POST /api/store/install; its pkgs go to bm_install.c)
 
@@ -1350,6 +1352,8 @@ static void api_handle(int s) {
     else if (!strncmp(target, "/api/smp/", 9)) api_smp(s, method, target, query, req);
     else if (!strcmp(target, "/api/store") || !strcmp(target, "/api/store/install")) api_store(s, method, target, query, req);
     else if (!strcmp(target, "/api/install") || !strncmp(target, "/api/install/", 13)) api_install(s, method, target, query, req);
+    else if (!strcmp(target, "/api/profile") || !strcmp(target, "/api/profile/set")) api_prof(s, method, target, query, req);
+    else if (!strcmp(target, "/api/src") || !strncmp(target, "/api/src/", 9) || (!strncmp(target, "/src/", 5) && !strcmp(method, "GET"))) api_src(s, method, target, query, req);
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/pull")) { api_pull_status(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "POST") && !strcmp(target, "/api/pull")) {
         char v[8];

@@ -33,6 +33,7 @@ typedef struct {
     char via[12];                         // sony | pkgmanager
     char src[900], name[200], err[300], step[200];
     char up_host[64], up_path[900]; int up_port, up_route, up_px;   // up_route 1: the daemon's route to its host; up_px 1: a PC answers only via the tsnet proxy
+    char srcname[32]; sparts_t sp;                                  // v2.12: a network source (bm_src.c): its name, and the file (maybe split) it reads
     char content_id[64], title_id[16], sony_status[20];
     long long total, served, done, rate;
     int remain, sony_error, cancel;
@@ -171,6 +172,10 @@ static int be_open(be_t *b) {
 }
 
 // ---------------------------------------------------------------- upstream: one Range read of the source
+// A job's bytes come from imgserve / a PC over HTTP (a socket), or from a network source (bm_src.c: FTP, SMB, WebDAV; a session per proxy connection)
+typedef struct { int fd; sess_t *ss; } up_t;
+static ssize_t up_read(up_t *u, void *b, size_t n) { return u->ss ? ss_read(u->ss, b, n) : read(u->fd, b, n); }
+static void up_close(up_t *u) { if (u->ss) ss_stream_close(u->ss); else if (u->fd >= 0) close(u->fd); u->fd = -1; }
 static int inst_up_open(long long a, long long b, long long *total, char *pre, size_t *pre_n, char *why, size_t wn) {
     char host[64], path[900]; int port, route, via_px;
     pthread_mutex_lock(&g_inst_mu);
@@ -212,6 +217,21 @@ static int inst_up_open(long long a, long long b, long long *total, char *pre, s
     return s;
 }
 
+static int inst_up_begin(sess_t **ssp, up_t *u, long long a, long long b, long long *total, char *pre, size_t *pre_n, char *why, size_t wn) {
+    char sn[32]; sparts_t *sp = malloc(sizeof *sp); if (!sp) { snprintf(why, wn, "out of memory"); return -1; }
+    pthread_mutex_lock(&g_inst_mu); snprintf(sn, sizeof sn, "%s", g_inst.srcname); *sp = g_inst.sp; pthread_mutex_unlock(&g_inst_mu);
+    u->ss = NULL; u->fd = -1;
+    if (!sn[0]) { u->fd = inst_up_open(a, b, total, pre, pre_n, why, wn); free(sp); return u->fd < 0 ? -1 : 0; }
+    int rc = -1;
+    if (!*ssp) { src_t sc; if (src_find(sn, &sc)) *ssp = ss_new(&sc); else snprintf(why, wn, "the source '%s' was removed", sn); }
+    if (*ssp) {
+        if (ss_range(*ssp, sp, a, b) == 0) { u->ss = *ssp; *total = sp->total; *pre_n = 0; rc = 0; }
+        else snprintf(why, wn, "%s", (*ssp)->why);
+    }
+    free(sp);
+    return rc;
+}
+
 // ---------------------------------------------------------------- the proxy Sony's installer reads (127.0.0.1:BM_INST_PORT)
 static int inst_live(unsigned id) {
     pthread_mutex_lock(&g_inst_mu);
@@ -228,6 +248,7 @@ static void *inst_conn(void *arg) {
     struct timeval tv = { 60, 0 };
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv); setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     char *buf = malloc(1 << 20), req[4096]; size_t have = 0; req[0] = 0;
+    sess_t *ss = NULL;                                              // a network source's session lives as long as this connection
     if (!buf) { close(s); return NULL; }
     for (;;) {                                                      // keep-alive: Sony sends several Range requests on one connection
         char *e = NULL;
@@ -259,31 +280,32 @@ static void *inst_conn(void *arg) {
                    : snprintf(hdr, sizeof hdr, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccept-Ranges: bytes\r\n"
                               "Content-Length: %lld\r\nConnection: %s\r\n\r\n", total, keep ? "keep-alive" : "close");
         if (!strcmp(method, "HEAD")) { if (write_all(s, hdr, (size_t)n) || !keep) goto out; continue; }
-        char why[200] = ""; size_t pn = 0; long long t2 = 0;
-        int u = inst_up_open(a, b, &t2, buf, &pn, why, sizeof why);
-        if (u < 0 || t2 != total) {
-            if (u >= 0) close(u);
-            logf_("install: proxy %s", u < 0 ? why : "the source changed size");
+        char why[200] = ""; size_t pn = 0; long long t2 = 0; up_t u;
+        int ur = inst_up_begin(&ss, &u, a, b, &t2, buf, &pn, why, sizeof why);
+        if (ur < 0 || t2 != total) {
+            if (ur >= 0) up_close(&u);
+            logf_("install: proxy %s", ur < 0 ? why : "the source changed size");
             inst_simple(s, 502, "Bad Gateway"); goto out;
         }
-        if (write_all(s, hdr, (size_t)n)) { close(u); goto out; }
+        if (write_all(s, hdr, (size_t)n)) { up_close(&u); goto out; }
         long long pos = a, left = b - a + 1; size_t k = pn;
         while (left > 0) {
             if (k) {
                 if ((long long)k > left) k = (size_t)left;
-                if (!inst_live(id) || write_all(s, buf, k)) { close(u); goto out; }   // cancel: the installer's read just ends
+                if (!inst_live(id) || write_all(s, buf, k)) { up_close(&u); goto out; }   // cancel: the installer's read just ends
                 pos += (long long)k; left -= (long long)k;
                 pthread_mutex_lock(&g_inst_mu); g_inst.served += (long long)k; g_inst.moved = time(NULL); pthread_mutex_unlock(&g_inst_mu);
             }
             if (left <= 0) break;
-            ssize_t r = read(u, buf, 1 << 20);
-            if (r <= 0) { logf_("install: the source ended at %lld of bytes %lld-%lld", pos, a, b); close(u); goto out; }
+            ssize_t r = up_read(&u, buf, 1 << 20);
+            if (r <= 0) { logf_("install: the source ended at %lld of bytes %lld-%lld%s%s", pos, a, b, u.ss ? ": " : "", u.ss ? u.ss->why : ""); up_close(&u); goto out; }
             k = (size_t)r;
         }
-        close(u);
+        up_close(&u);
         if (!keep) break;
     }
 out:
+    ss_free(ss);
     free(buf); close(s);
     return NULL;
 }
@@ -292,7 +314,7 @@ static void *inst_listen(void *arg) {
     for (;;) {
         int s = accept(ls, NULL, NULL);
         if (s < 0) { if (errno == EINTR) continue; sleep(1); continue; }
-        pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 256 * 1024);
+        pthread_t t; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 512 * 1024);          // a network source's session (libsmb2) lives on this stack
         pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
         if (pthread_create(&t, &at, inst_conn, (void *)(intptr_t)s)) close(s);
         pthread_attr_destroy(&at);
@@ -377,9 +399,21 @@ static void *inst_run(void *arg) {
     pthread_mutex_unlock(&g_inst_mu);
 
     char why[200] = "", pre[4096]; size_t pn = 0; long long total = 0;
-    int s = inst_up_open(0, 0, &total, pre, &pn, why, sizeof why);   // the size, and the source answers Range
-    if (s < 0) { inst_set("failed", "the source: %s", why); return NULL; }
-    close(s);
+    char sname[32]; pthread_mutex_lock(&g_inst_mu); snprintf(sname, sizeof sname, "%s", g_inst.srcname); pthread_mutex_unlock(&g_inst_mu);
+    if (sname[0]) {                                                  // a network source: log in, find the file (or its .pkg.N parts), its size
+        src_t sc; sparts_t *sp = calloc(1, sizeof *sp); sess_t *ss = NULL; char want[900];
+        pthread_mutex_lock(&g_inst_mu); snprintf(want, sizeof want, "%s", g_inst.up_path); pthread_mutex_unlock(&g_inst_mu);
+        if (!sp || !src_find(sname, &sc) || !(ss = ss_new(&sc))) { free(sp); inst_set("failed", "the source '%s' is gone", sname); return NULL; }
+        if (sp_resolve(ss, want, sp)) { inst_set("failed", "the source: %s", ss->why[0] ? ss->why : "cannot read the file"); ss_free(ss); free(sp); return NULL; }
+        ss_free(ss);
+        pthread_mutex_lock(&g_inst_mu); g_inst.sp = *sp; total = sp->total; pthread_mutex_unlock(&g_inst_mu);
+        logf_("install: source %s (%s): %s = %lld bytes in %d part%s", sc.name, sc.kind, want, sp->total, sp->n, sp->n == 1 ? "" : "s");
+        free(sp);
+    } else {
+        int s = inst_up_open(0, 0, &total, pre, &pn, why, sizeof why);   // the size, and the source answers Range
+        if (s < 0) { inst_set("failed", "the source: %s", why); return NULL; }
+        close(s);
+    }
     pthread_mutex_lock(&g_inst_mu); g_inst.total = total; g_inst.moved = time(NULL); pthread_mutex_unlock(&g_inst_mu);
 
     be_t be = { -1, -1, 0, 0 };
@@ -480,7 +514,7 @@ static void inst_status(sb_t *b) {
     long long eta = -1;
     if (inst_running_locked() && g_inst.total > 0) eta = g_inst.rate > 0 ? (g_inst.total - g_inst.done) / g_inst.rate : (g_inst.remain > 0 ? g_inst.remain : -1);
     sb_f(b, "{\"state\":\"%s\",\"via\":\"%s\",\"id\":%u,\"name\":", g_inst.state, g_inst.via, g_inst.id); sb_js(b, g_inst.name);
-    sb_puts(b, ",\"src\":"); sb_js(b, g_inst.src);
+    sb_puts(b, ",\"src\":"); sb_js(b, g_inst.src); sb_puts(b, ",\"source\":"); sb_js(b, g_inst.srcname);
     sb_puts(b, ",\"title_id\":"); sb_js(b, g_inst.title_id); sb_puts(b, ",\"content_id\":"); sb_js(b, g_inst.content_id);
     sb_f(b, ",\"total\":%lld,\"done\":%lld,\"served\":%lld,\"progress\":%.1f,\"rate\":%lld,\"eta\":%lld,\"remain_time\":%d",
          g_inst.total, g_inst.done, g_inst.served, g_inst.total > 0 ? 100.0 * (double)g_inst.done / (double)g_inst.total : 0.0, g_inst.rate, eta, g_inst.remain);
@@ -493,7 +527,7 @@ static void inst_status(sb_t *b) {
 }
 
 // start a job (the API and the store call this); the HTTP status, the JSON answer in *b
-static int inst_begin(const char *host, int port, int route, const char *up, const char *src, const char *name_in, sb_t *b) {
+static int inst_begin(const char *host, int port, int route, const char *up, const char *src, const char *name_in, sb_t *b, const char *srcname) {
     char name[200]; snprintf(name, sizeof name, "%s", name_in ? name_in : "");
     if (!name[0]) { const char *f = strrchr(up, '/'); snprintf(name, sizeof name, "%s", f ? f + 1 : up); char *dot = strrchr(name, '.'); if (dot) *dot = 0; }
     pthread_mutex_lock(&g_inst_mu);
@@ -507,6 +541,7 @@ static int inst_begin(const char *host, int port, int route, const char *up, con
     snprintf(g_inst.src, sizeof g_inst.src, "%s", src); snprintf(g_inst.name, sizeof g_inst.name, "%s", name);
     snprintf(g_inst.up_host, sizeof g_inst.up_host, "%s", host); g_inst.up_port = port; g_inst.up_route = route;
     snprintf(g_inst.up_path, sizeof g_inst.up_path, "%s", up);
+    if (srcname) snprintf(g_inst.srcname, sizeof g_inst.srcname, "%s", srcname);
     g_inst.started = g_inst.moved = time(NULL); snprintf(g_inst.step, sizeof g_inst.step, "asking the source for its size");
     pthread_mutex_unlock(&g_inst_mu);
     logf_("ui: install %s from %s:%d%s (job %u)", name, host, port, up, id);
@@ -524,7 +559,7 @@ static int inst_begin_shelf(const char *rel, const char *name, sb_t *b) {
     conf_t *c = malloc(sizeof *c); if (!c) return 500;
     read_conf(c); char host[64]; snprintf(host, sizeof host, "%s", c->host); int port = c->port; free(c);
     char up[1000]; snprintf(up, sizeof up, "/pkg/%s", rel);
-    return inst_begin(host, port, 1, up, rel, name, b);
+    return inst_begin(host, port, 1, up, rel, name, b, NULL);
 }
 
 static void api_install(int s, const char *method, const char *target, const char *query, const char *req) {
@@ -546,8 +581,18 @@ static void api_install(int s, const char *method, const char *target, const cha
         if (on) logf_("ui: install cancelled (%s)", g_inst.name);
         sb_f(&b, "{\"ok\":%s}", on ? "true" : "false"); reply_json(s, on ? 200 : 409, &b); free(b.b); return;
     }
-    char path[900] = "", url[1000] = "", name[200] = "", host[64] = "", up[900] = ""; int port = 0, route = 0;
-    get_q(query, "path", path, sizeof path); get_q(query, "url", url, sizeof url); get_q(query, "name", name, sizeof name);
+    char path[900] = "", url[1000] = "", name[200] = "", host[64] = "", up[900] = "", srcn[40] = ""; int port = 0, route = 0;
+    get_q(query, "path", path, sizeof path); get_q(query, "url", url, sizeof url); get_q(query, "name", name, sizeof name); get_q(query, "src", srcn, sizeof srcn);
+    if (srcn[0]) {                                                   // a network source (bm_src.c): path is under its base
+        src_t sc;
+        if (!src_find(srcn, &sc)) { sb_puts(&b, "{\"ok\":false,\"error\":\"no such source\"}"); reply_json(s, 404, &b); free(b.b); return; }
+        if (!path[0] || !rel_ok(path) || path[0] == '/' || (!ends_with(path, ".pkg", 1) && !ends_with(path, ".pkg.0", 1) && !ends_with(path, ".pkg.1", 1))) {
+            sb_puts(&b, "{\"ok\":false,\"error\":\"path=<a .pkg under the source's base, from /api/src/ls>\"}"); reply_json(s, 400, &b); free(b.b); return;
+        }
+        char label[1000]; snprintf(label, sizeof label, "%s:%s", srcn, path);
+        int code = inst_begin(sc.host, sc.port, 0, path, label, name, &b, srcn);
+        reply_json(s, code, &b); free(b.b); return;
+    }
     if (path[0] && inst_rel_ok(path)) {
         conf_t *c = malloc(sizeof *c); if (!c) { reply_json(s, 500, &b); return; }
         read_conf(c); snprintf(host, sizeof host, "%s", c->host); port = c->port; free(c);
@@ -555,7 +600,7 @@ static void api_install(int s, const char *method, const char *target, const cha
     } else if (!(url[0] && inst_url_parse(url, host, sizeof host, &port, up, sizeof up))) {
         sb_puts(&b, "{\"ok\":false,\"error\":\"path=<a path from /api/install/pkgs> or url=http://<ip>:<port>/<file>.pkg\"}"); reply_json(s, 400, &b); free(b.b); return;
     }
-    int code = inst_begin(host, port, route, up, path[0] && route ? path : url, name, &b);
+    int code = inst_begin(host, port, route, up, path[0] && route ? path : url, name, &b, NULL);
     reply_json(s, code, &b); free(b.b);
 
 }

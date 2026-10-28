@@ -19,9 +19,9 @@ FORK="${FORK:-$HERE/../link-fork/prebuilt/libSceAmpr.sprx}"
 [ -f "$FORK" ] || { echo "no fork at $FORK (set FORK=...)"; exit 1; }
 mkdir -p "$HERE/out"
 if [ -n "$BM_REV" ]; then
-  VERSION="2.11-$BM_REV"
+  VERSION="2.12-$BM_REV"
 else
-  VERSION="2.11-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo local)$(git -C "$HERE" diff --quiet -- src 2>/dev/null || echo '+dirty')"
+  VERSION="2.12-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo local)$(git -C "$HERE" diff --quiet -- src 2>/dev/null || echo '+dirty')"
 fi
 python3 -I - "$FORK" "$HERE/out/fork_blob.h" <<'EOF'
 import hashlib, sys
@@ -37,9 +37,16 @@ with open(sys.argv[2], "w") as fh:
 EOF
 DEFS="-DBM_VERSION=\"$VERSION\""
 [ -n "$BM_DEFAULT_HOST" ] && DEFS="$DEFS -DBM_DEFAULT_HOST=\"$BM_DEFAULT_HOST\""
+# v2.12: SMB network sources = libsmb2 (tools/build-libsmb2.sh builds it: host = the tests, ps5 = the console). NO_SMB=1 builds without.
+SMBLIB=""
+if [ -z "${NO_SMB:-}" ]; then
+  MODE=ps5; [ -n "$HOST" ] && MODE=host
+  PFX="$(sh "$HERE/tools/build-libsmb2.sh" $MODE)" || { echo "libsmb2 failed (NO_SMB=1 builds a payload without SMB sources)"; exit 1; }
+  DEFS="$DEFS -DBM_HAVE_SMB2 -I$PFX/include"; SMBLIB="$PFX/lib/libsmb2.a"
+fi
 if [ -n "$HOST" ]; then
   rm -f "$HERE/out/inst_helper_blob.h"                            # a host build runs its helper from BM_INST_HELPER instead
-  ${CC:-cc} -O2 -Wall -Wextra -std=gnu11 $DEFS -I"$HERE/out" -o "$HERE/out/blazingmountd-host" "$HERE/src/blazingmountd.c"
+  ${CC:-cc} -O2 -Wall -Wextra -std=gnu11 $DEFS -I"$HERE/out" -o "$HERE/out/blazingmountd-host" "$HERE/src/blazingmountd.c" $SMBLIB
   echo "built: $HERE/out/blazingmountd-host ($VERSION, fork sha256 $(shasum -a 256 "$FORK" | cut -c1-16))"
   exit 0
 fi
@@ -59,5 +66,5 @@ with open(sys.argv[2], "w") as fh:
         fh.write(",".join(str(b) for b in data[i:i + 24]) + ",\n")
     fh.write("};\n")
 EOF2
-"$CC" -O2 -Wall -Wextra -std=gnu11 $DEFS -I"$HERE/out" -o "$HERE/out/blazingmountd.elf" "$HERE/src/blazingmountd.c" -lkernel_sys
+"$CC" -O2 -Wall -Wextra -std=gnu11 $DEFS -I"$HERE/out" -o "$HERE/out/blazingmountd.elf" "$HERE/src/blazingmountd.c" $SMBLIB -lkernel_sys
 echo "built: $HERE/out/blazingmountd.elf ($VERSION, fork sha256 $(shasum -a 256 "$FORK" | cut -c1-16))"
