@@ -43,6 +43,19 @@ std::string HostData(const std::string& base, const std::string& rel) {
   return body;
 }
 
+// BM_LIVE=<console ip>: GET answers come from a REAL console's API (:8094) instead of the fixtures (read-only; POSTs are only acknowledged, never sent)
+std::string Live(const std::string& ip, const std::string& path) {
+  std::string url = "http://" + ip + ":8094" + path;
+  if (url.find_first_of("'\\ \n") != std::string::npos) return "";
+  std::string body;
+  if (FILE* p = popen(("curl -s -f --max-time 40 '" + url + "'").c_str(), "r")) {
+    char buf[65536];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, p)) > 0;) body.append(buf, n);
+    if (pclose(p) != 0) body.clear();
+  }
+  return body;
+}
+
 struct Rig {
   bm::App app;
   std::string dir;
@@ -80,6 +93,12 @@ struct Rig {
           const char* d = std::getenv("BM_ICONS");
           std::string png = d ? Read(std::string(d) + "/" + r.path.substr(10) + ".png") : "";
           app.OnResponse(r.path, png.empty() ? 404 : 200, png);
+          continue;
+        }
+        if (const char* live = std::getenv("BM_LIVE")) {
+          if (r.method == "POST") { app.OnResponse(r.path, 200, "{\"ok\":true}"); continue; }
+          std::string body = Live(live, r.path);
+          app.OnResponse(r.path, body.empty() ? 404 : 200, body);
           continue;
         }
         if (r.method == "POST" && base != "/api/profile/set") { app.OnResponse(r.path, 200, "{\"ok\":true}"); continue; }
