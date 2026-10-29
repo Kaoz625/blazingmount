@@ -136,3 +136,12 @@ Key files: console/blazingmountd/src/{bm_src.c,bm_prof.c,bm_install.c}, console/
   app/src/bm_app.h, app/fixtures/{src,src-ls,profile}.json.
 Blockers: DIGI5 claim held by another agent (not stale: renewed).
 NOTE: I accidentally printed two SMB passwords (mac1 game-shares-smb + macbook-smb) into my session output on 28 Oct (a bad sed mask); nothing was written to a file or the hub.
+
+## bm-backport-gate lane (claude-nyc-main, 29 Oct 2026)
+Working on: blazingmountd 2.13 - a newer-FW game builds when backports/<TID>[suffix] exists (Mortal Shell II PPSA34008 on PHAT5).
+Last action: code + host test committed and pushed (b9f26aa code+test, 0153790 version 2.13). Payload NOT built or deployed: mac2 is unreachable (ssh 100.88.99.116:22 times out, also from mac1); MacBook SDK lacks headers, mac1 has no SDK.
+Next step: when mac2 answers: zsh host/build-payload-mac2.sh /Users/markanthony/NYCT/blazing-fighters/assets-local/smblink/fork/20261028-005321/libSceAmpr.sprx   (fork sha 15533a6e = both consoles' current)
+  then ps5-status PHAT5 (idle) and: zsh host/deploy-payload.sh PHAT5 ~/.blazing/blazingmountd-2.13-0153790.elf claude-nyc-main ; ps5-release PHAT5 claude-nyc-main
+  verify: curl -s http://192.168.1.140:8094/api/library (PPSA34008 not needs_fw) + http://192.168.1.140:8080/fs/data/blazing/blazingmountd.log ("building with backport").
+Key files: console/blazingmountd/src/blazingmountd.c (backport_for(), fw_refusal), host/test_backport_gate.py (python3 -I host/test_backport_gate.py --bin console/blazingmountd/out/blazingmountd-host; HOST=1 NO_SMB=1 build).
+Blockers: mac2 down. PHAT5 was idle + unclaimed when checked; DIGI5 not touched.
