@@ -16,7 +16,8 @@
 //          - fakelib/libSceAmpr.sprx = OUR link fork, EMBEDDED in this payload (+ the game's own fakelib files except its libSceAmpr)
 //        write /data/blazing/link/<TID>.cfg, then move the starter into /data/homebrew/ (ShadowMount registers the tile)
 //   A game is built once: the state file /data/blazing/blazingmountd.state remembers done / refused / failed (failed: 3 tries max),
-//   so nothing is downloaded again in a loop. Games that need a newer FW than this console are refused (backport = phase 2).
+//   so nothing is downloaded again in a loop. Games that need a newer FW than this console are refused (backport = phase 2)
+//   unless a hand-placed backports/<TID> overlay exists; that refusal is re-checked every pass.
 //
 // It never fetches, cracks, signs, or decrypts anything: the host only serves files the user put there. Content-neutral.
 //
@@ -545,6 +546,21 @@ static const char *tid_dir(const char *tid) {                         // the fir
     return NULL;
 }
 
+// a hand-placed SMP backport overlay for tid: <homebrew_dir>/backports/<TID> or <TID> + any suffix (SMP matches the same way). Copies its path to out.
+static int backport_for(const conf_t *c, const char *tid, char *out, size_t on) {
+    char hb[600], bd[700]; snprintf(bd, sizeof bd, "%s/backports", P(hb, sizeof hb, c->homebrew_dir));
+    DIR *d = opendir(bd);
+    if (!d) return 0;
+    struct dirent *e; int found = 0; size_t tl = strlen(tid);
+    while (!found && (e = readdir(d))) {
+        if (strncmp(e->d_name, tid, tl)) continue;
+        char p[1000]; struct stat st; snprintf(p, sizeof p, "%s/%s", bd, e->d_name);
+        if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) { snprintf(out, on, "%s/backports/%s", c->homebrew_dir, e->d_name); found = 1; }
+    }
+    closedir(d);
+    return found;
+}
+
 // ---------------------------------------------------------------- ampr_emu.index (AMPRIDX3), exactly host/engine/amprindex.build()
 typedef struct { const char *path; size_t plen; long long size; size_t blob_off; int order; } ix_t;
 
@@ -1061,10 +1077,13 @@ static int sync_once(void) {
         }
         st_t *s = state_get(g.key);
         int size_refusal = s && !strcmp(s->status, "refused") && !strncmp(s->reason, "starter would be", 16);   // re-checked: free space changes
-        if (s && ((!strcmp(s->status, "refused") && !size_refusal) || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES) || !strcmp(s->status, "done"))) { known++; continue; }
+        int fw_refusal = s && !strcmp(s->status, "refused") && !strncmp(s->reason, "needs FW", 8);          // re-checked: a backport overlay may have been added
+        if (s && ((!strcmp(s->status, "refused") && !size_refusal && !fw_refusal) || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES) || !strcmp(s->status, "done"))) { known++; continue; }
         if (!g.version[0]) { state_set(g.key, "refused", "sce_sys/param.json unreadable (image damaged?)"); refused++; logf_("refused %s: param.json unreadable", g.key); continue; }
         int gfw = fw_hundredths(g.fw);
-        if (cfw && gfw > cfw) {
+        char bp[1000];
+        if (cfw && gfw > cfw && backport_for(&c, g.tid, bp, sizeof bp)) logf_("%s %s needs FW %s, console is %d.%02d: building with backport %s", g.key, g.title, g.fw, cfw / 100, cfw % 100, bp);
+        else if (cfw && gfw > cfw) {
             char r[200]; snprintf(r, sizeof r, "needs FW %s, console is %d.%02d: backport not built on the console yet (phase 2)", g.fw, cfw / 100, cfw % 100);
             state_set(g.key, "refused", r); refused++; logf_("refused %s %s: %s", g.key, g.title, r); continue;
         }
