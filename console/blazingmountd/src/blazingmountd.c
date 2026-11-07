@@ -1078,7 +1078,10 @@ static int sync_once(void) {
         st_t *s = state_get(g.key);
         int size_refusal = s && !strcmp(s->status, "refused") && !strncmp(s->reason, "starter would be", 16);   // re-checked: free space changes
         int fw_refusal = s && !strcmp(s->status, "refused") && !strncmp(s->reason, "needs FW", 8);          // re-checked: a backport overlay may have been added
-        if (s && ((!strcmp(s->status, "refused") && !size_refusal && !fw_refusal) || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES) || !strcmp(s->status, "done"))) { known++; continue; }
+        // "done" but no starter folder carries the title id any more (M.2 reformatted 6 Nov 2026: 10 games sat "settled"
+        // with nothing on the console): the record is stale, so build it again instead of trusting it.
+        if (s && !strcmp(s->status, "done")) logf_("starter gone for %s %s (state said done): building it again", g.key, g.title);
+        else if (s && ((!strcmp(s->status, "refused") && !size_refusal && !fw_refusal) || (!strcmp(s->status, "failed") && s->tries >= MAX_TRIES))) { known++; continue; }
         if (!g.version[0]) { state_set(g.key, "refused", "sce_sys/param.json unreadable (image damaged?)"); refused++; logf_("refused %s: param.json unreadable", g.key); continue; }
         int gfw = fw_hundredths(g.fw);
         char bp[1000];
