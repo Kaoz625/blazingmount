@@ -64,7 +64,8 @@ struct Rig {
   bool pmBusy = false;      // INSTALL: PKG Manager reports an install running
   bool instBusy = false;    // INSTALL: BlazingMount's own installer (payload 2.10 /api/install) is installing
   bool storeBusy = false;   // INSTALL > Store: a store install running
-  bool storeSlow = false;   // INSTALL > Store: the payload has not answered /api/store yet (it asks the host: up to 15 s)
+  bool storeSlow = false;
+  bool local214 = false;    // payload 2.14 (bm_local.c): status-214.json / library-214.json (copy to M.2 / internal, back to streaming)   // INSTALL > Store: the payload has not answered /api/store yet (it asks the host: up to 15 s)
   // answers every request from the fixtures, as the API would
   void Pump() {
     for (int round = 0; round < 6; ++round) {
@@ -73,7 +74,7 @@ struct Rig {
       if (reqs.empty()) break;
       for (auto& r : reqs) {
         std::string base = r.path.substr(0, r.path.find('?'));
-        std::string file = base == "/api/status" ? "status.json" : base == "/api/library" ? "library.json" : base == "/api/settings" ? "settings.json"
+        std::string file = base == "/api/status" ? (local214 ? "status-214.json" : "status.json") : base == "/api/library" ? (local214 ? "library-214.json" : "library.json") : base == "/api/settings" ? "settings.json"
                          : base == "/api/log" ? "log.json" : base == "/api/pm/drives" ? "pm-drives.json" : base == "/api/pm/packages" ? "pm-packages.json"
                          : base == "/api/pm/status" ? (pmBusy ? "pm-status-busy.json" : "pm-status.json") : base == "/api/pm/queue" ? "pm-queue.json"
                          : base == "/api/store" ? (storeBusy ? "store-busy.json" : "store.json")
@@ -196,6 +197,14 @@ int main(int argc, char** argv) {
                            r.Wait(1); bad += Shot(font, r, out + "/26-removing"); }
   if (on("27-remove-failed")) { Rig r; r.dir = fx; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch);
                                 for (int i = 0; i < 4; ++i) r.Press(kDown); r.Wait(1); bad += Shot(font, r, out + "/27-remove-failed"); }
+  // 0.9 (payload 2.14, bm_local.c): the console copies the game itself: Copy to M.2 / console storage, progress, Back to streaming / move
+  if (on("40-copy-confirm")) { Rig r; r.dir = fx; r.local214 = true; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kCross);
+                               bad += Shot(font, r, out + "/40-copy-confirm"); }
+  if (on("41-copying")) { Rig r; r.dir = fx; r.local214 = true; r.Wait(0); for (int i = 0; i < 4; ++i) r.Press(kOptions); r.Press(kTouch); r.Wait(1);
+                          bad += Shot(font, r, out + "/41-copying"); }
+  if (on("42-back-confirm")) { Rig r; r.dir = fx; r.local214 = true; r.Wait(0); for (int i = 0; i < 3; ++i) r.Press(kOptions); r.Press(kTouch); r.Press(kDown);
+                               r.Press(kCross); bad += Shot(font, r, out + "/42-back-confirm"); }
+  if (on("43-copying-grid")) { Rig r; r.dir = fx; r.local214 = true; r.Wait(0); r.Wait(1); bad += Shot(font, r, out + "/43-copying-grid"); }
   if (on("20-discover-wishlist")) { Rig r; r.dir = fx; r.Wait(0); r.Press(kR1); r.Wait(0.5); r.Press(kL2); r.Wait(1); bad += Shot(font, r, out + "/20-discover-wishlist"); }
   std::printf(bad ? "%d FAIL\n" : "ALL SHOTS OK\n", bad);
   return bad ? 1 : 0;

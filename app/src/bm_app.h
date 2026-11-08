@@ -60,6 +60,10 @@ struct Game {
   bool onConsole = false;
   long long localBytes = 0, requestAt = 0, dlDone = 0, dlTotal = 0, dlEta = 0, dlAt = 0;
   std::string copies, request, dlState, dlMsg;
+  // v2.14 (payload bm_local.c): the console copies the game itself: where its local copy is (m2 | internal | ...), and the job
+  std::string where, ljKind, ljState, ljTo, ljMsg;
+  long long ljDone = 0, ljSize = 0, ljRate = 0, ljEta = 0;
+  bool ljActive = false;
 };
 
 struct Setting {
@@ -147,6 +151,13 @@ inline const char* DlPercent(long long done, long long total) {   // "DOWNLOADIN
 }
 // The app's newest request that mac1's worker has not taken up yet: no job line, or one older than the request (the worker
 // writes the line within ~20 s of taking it up). `request` alone cannot say: a remove run on mac1 leaves the old "download".
+inline const char* LjPercent(const char* verb, long long done, long long total) {   // "COPYING 37%" / "MOVING 37%" (fixed strings)
+  static std::map<std::string, std::string> pct;
+  const int p = total > 0 ? int(std::clamp(done * 100 / total, 0LL, 100LL)) : 0;
+  std::string k = std::string(verb) + " " + std::to_string(p) + "%";
+  return pct.emplace(k, k).first->second.c_str();
+}
+inline const char* WhereName(const std::string& w) { return w == "m2" ? "M.2" : w == "internal" ? "console storage" : w == "usb" ? "USB drive" : "console"; }
 inline bool Pending(const Game& g) { return g.dlState.empty() || (!DlActive(g.dlState) && g.requestAt > g.dlAt); }
 inline bool DlAsked(const Game& g) { return g.request == "download" && Pending(g); }
 inline bool RmAsked(const Game& g) { return g.request == "remove_local" && Pending(g); }
@@ -159,6 +170,14 @@ inline Badge BadgeOf(const Game& g) {
   const std::string& s = g.state;
   if (s == "playing") return {"PLAYING", 3};
   if (s == "building") return {"BUILDING", 3};
+  if (g.ljActive) {                                                    // v2.14: the console copies it itself
+    if (g.ljState == "copying") return {LjPercent("COPYING", g.ljDone, g.ljSize), 3};
+    if (g.ljState == "moving") return {LjPercent("MOVING", g.ljDone, g.ljSize), 3};
+    if (g.ljState == "ready") return {"COPIED, SWITCHES SOON", 3};
+    if (g.ljState == "releasing") return {"BACK TO STREAMING", 3};
+    if (g.ljState == "cancelling") return {"STOPPING", 3};
+  }
+  if (g.ljState == "failed") return {"COPY FAILED", 2};
   if (g.dlState == "sending") return {DlPercent(g.dlDone, g.dlTotal), 3};
   if (g.dlState == "verifying") return {"CHECKING COPY", 3};
   if (g.dlState == "switching") return {"SWITCHING", 3};
@@ -246,6 +265,12 @@ class App {
         g.request = j["request"].str(); g.requestAt = j["request_at"].ll();
         g.dlState = j["dl_state"].str(); g.dlMsg = j["dl_msg"].str();
         g.dlDone = j["dl_done"].ll(); g.dlTotal = j["dl_total"].ll(); g.dlEta = j["dl_eta"].ll(); g.dlAt = j["dl_at"].ll();
+        g.where = j["where"].str();
+        const json::Value& lj = j["lj"];
+        if (lj.ok() && !lj["state"].str().empty()) {
+          g.ljKind = lj["kind"].str(); g.ljState = lj["state"].str(); g.ljTo = lj["to"].str(); g.ljMsg = lj["msg"].str();
+          g.ljDone = lj["done"].ll(); g.ljSize = lj["size"].ll(); g.ljRate = lj["rate"].ll(); g.ljEta = lj["eta"].ll(); g.ljActive = lj["active"].truthy();
+        }
         games_.push_back(std::move(g));
       }
       haveLibrary_ = true;
@@ -744,7 +769,19 @@ class App {
         Toast(it->plays.empty() ? it->title + ": nothing plays it yet" : it->title + " plays on " + it->plays);
       return;
     }
-    if (b == kCross) {
+    if (b == kCross && LocalOk()) {                                // payload 2.14: the console copies it itself (bm_local.c)
+      if (g->ljActive && (g->ljState == "copying" || g->ljState == "moving" || g->ljState == "ready"))
+        Ask_("lcancel", *g, "Stop copying " + g->title + "?", "What arrived so far is deleted. Nothing else changes: it keeps playing from where it does now.", "Stop copy");
+      else if (g->ljActive) Toast(g->title + ": " + (g->ljMsg.empty() ? g->ljState : g->ljMsg));
+      else if (g->state == "playing") Toast(g->title + " is running: close it first");
+      else if (g->onConsole && g->local == "pkg") Toast(g->title + " is an installed game: remove it in the PS5's Storage settings");
+      else if (g->local == "image") AskBack(*g);
+      else if (g->onConsole) Toast(g->title + " plays from this console" + (g->copies.empty() ? "" : ": " + g->copies));
+      else if ((g->local == "starter" || g->local == "none") && g->onDrives && g->format != "folder" && g->state != "needs_fw") AskCopy(*g);
+      else if (g->state == "needs_fw") Toast(g->title + " needs FW " + g->fw + " (this console: " + consoleFw_ + ")");
+      else if (g->state == "building") Toast("Being built right now");
+      else { Act("install", g->tid); Toast("Install " + g->title + ": queued"); }
+    } else if (b == kCross) {
       if (g->state == "playing") Toast(g->title + " is running: close it first");
       else if (g->dlState == "removing") Toast(g->title + ": removing the local copy, wait for it");   // a removal is never cancelled
       else if (RmAsked(*g)) Toast("Remove asked: mac1's helper starts it");
@@ -776,6 +813,42 @@ class App {
     const std::string hb = status_["homebrew_dir"].str();
     const std::string drv = hb.rfind("/mnt/ext1", 0) == 0 ? "ext1" : hb.rfind("/mnt/ext0", 0) == 0 ? "ext0" : "data";
     return {drv == "ext1" ? "M.2" : drv == "ext0" ? "extended storage" : "console storage", status_["free_mb"][drv.c_str()].ll()};
+  }
+  // ---- 0.9 (payload 2.14): copy to the M.2 / console storage and back to streaming, done by the console itself
+  bool LocalOk() const { return status_["local"]["v"].ll() >= 1; }
+  std::string FreeLine(const char* drv, long long needBytes) const {
+    const long long fm = status_["free_mb"][drv].ll(), after = fm - needBytes / (1024 * 1024);
+    return FreeText(fm) + " now, " + (needBytes > 0 ? FreeText(std::max(after, 0LL)) + " after" : std::string());
+  }
+  void AskCopy(const Game& g) {
+    if (g.size <= 0) { Toast(g.title + ": its size is not known yet"); return; }
+    const long long need = g.size / (1024 * 1024);
+    const bool m2 = status_["local"]["m2"].truthy();
+    const bool fitM2 = m2 && status_["free_mb"]["ext1"].ll() - need >= status_["local"]["keep_m2_mb"].ll();
+    const bool fitInt = status_["free_mb"]["data"].ll() - need >= status_["local"]["keep_internal_mb"].ll();
+    if (!fitM2 && !fitInt) {
+      Toast("Not enough room for " + g.title + " (" + Gb(g.size) + "): " + (m2 ? "M.2 " + FreeText(status_["free_mb"]["ext1"].ll()) + ", " : std::string()) +
+            "console storage " + FreeText(status_["free_mb"]["data"].ll()));
+      return;
+    }
+    std::string body = Gb(g.size) + " copied from your drives onto this console. ";
+    if (m2) body += "M.2: " + (fitM2 ? FreeLine("ext1", g.size) : FreeText(status_["free_mb"]["ext1"].ll()) + ", not enough room") + ". ";
+    body += "Console storage: " + (fitInt ? FreeLine("data", g.size) : FreeText(status_["free_mb"]["data"].ll()) + ", not enough room") +
+            " (" + Gb(status_["local"]["keep_internal_mb"].ll() * 1048576) + " always stays free). ";
+    body += "It keeps streaming meanwhile, then switches to the copy by itself when the game is closed; its starter is kept for Back to streaming.";
+    if (status_["route"].str() == "TAILNET") body += " You are away: it uses " + Gb(g.size) + " of this connection's data.";
+    if (fitM2 && fitInt) Ask_("local&to=m2", g, "Copy " + g.title + " to this console?", body, "Copy to M.2", "local&to=internal", "Copy to console storage");
+    else if (fitM2) Ask_("local&to=m2", g, "Copy " + g.title + " to this console?", body, "Copy to M.2");
+    else Ask_("local&to=internal", g, "Copy " + g.title + " to this console?", body, "Copy to console storage");
+  }
+  void AskBack(const Game& g) {
+    const long long bytes = g.localBytes > 0 ? g.localBytes : g.size;
+    std::string body = "Deletes the copy on the " + std::string(WhereName(g.where)) + " (frees " + Gb(bytes) + "). " + g.title +
+                       " streams from your drives again. Only when your drives still have the same image; ShadowMount lets go of it once no game or app is open.";
+    const bool m2 = status_["local"]["m2"].truthy();
+    if (g.where == "m2") Ask_("stream", g, "Back to streaming?", body + " Or move it to console storage.", "Back to streaming", "local&to=internal", "Move to console storage");
+    else if (m2) Ask_("stream", g, "Back to streaming?", body + " Or move it to the M.2.", "Back to streaming", "local&to=m2", "Move to M.2");
+    else Ask_("stream", g, "Back to streaming?", body, "Back to streaming");
   }
   // Remove the local copy (0.5.1): the space it frees; mac1 puts the streaming starter back
   void AskRemoveLocal(const Game& g) {
@@ -1464,7 +1537,21 @@ class App {
       if (!g->reason.empty()) Fact(b, px, y, pw, g->build == "done" ? "Last build" : "Why", g->reason, g->build == "done" ? c::kText : c::kAccent);
     }
     std::string hint;
-    if (g) {
+    if (g && (g->ljActive || g->ljState == "failed")) {               // payload 2.14: the console's own copy job
+      std::string d = g->ljState == "copying" ? "Copying to the " : g->ljState == "moving" ? "Moving to the " : g->ljState == "failed" ? "" : "";
+      if (!d.empty()) d += std::string(WhereName(g->ljTo)) + "   " + Gb(g->ljDone) + " of " + Gb(g->ljSize);
+      if (g->ljRate > 0 && g->ljEta >= 0) d += "   " + std::to_string(g->ljRate / 1000000) + " MB/s, about " + std::to_string(g->ljEta / 60 + 1) + " min left";
+      if (!g->ljMsg.empty() && g->ljState != "copying" && g->ljState != "moving") d += (d.empty() ? "" : "   ") + g->ljMsg;
+      Fact(b, px, y, pw, "Copy", d, g->ljState == "failed" ? c::kAccent : c::kText);
+    }
+    if (g && LocalOk()) {
+      if (g->ljActive) hint = g->ljState == "releasing" || g->ljState == "cancelling" ? "" : "{CROSS} Stop copy   ";
+      else if (g->local == "image" && g->state != "playing") hint = "{CROSS} Back to streaming / move   ";
+      else if (!g->onConsole && (g->local == "starter" || g->local == "none") && g->onDrives && g->format != "folder" && g->state != "playing" && g->state != "needs_fw")
+        hint = "{CROSS} Copy to this console   ";
+      if (g->local == "starter" && g->onDrives && g->state != "playing") hint += "{TRIANGLE} Rebuild   ";
+      hint += g->choice == "skip" ? "{SQUARE} Show" : "{SQUARE} Hide";
+    } else if (g) {
       if (DlActive(g->dlState)) hint = g->dlState == "removing" ? "" : "{CROSS} Stop download   ";
       else if (Removable(*g) && !RmAsked(*g) && g->state != "playing") hint = "{CROSS} Remove local copy   ";
       else if (g->local == "starter" && !g->onConsole && g->state != "playing") hint = "{CROSS} Download to console   ";
