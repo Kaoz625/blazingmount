@@ -347,3 +347,26 @@ runs ON the console and reads the server itself. We took the idea, not the code:
   `host/test_download_e2e.py`, which now runs the whole Download -> switch -> Remove local copy story twice: FTP push and
   console pull. Proven with the host build against mac1's test imgserve on :4459: Cloudberry Kingdom, 647,823,360 B, 4
   connections, 21.5 MB/s over the MacBook's Wi-Fi, sha256 equal to mac1's file.
+
+## Copy to M.2 / console storage, on the console itself (payload v2.14, app 0.9.0, 8 Nov 2026)
+
+Markus, 8 Nov: *"i need a way to move games from the external drives to the internal or the m.2 when i need to."* The same
+story as sections 5.4 and 5.5, now run by the payload alone (no mac1 worker): `console/blazingmountd/src/bm_local.c`.
+
+| Action | What happens |
+|---|---|
+| `POST /api/action?do=local&tid=T&to=m2\|internal` | the image is pulled (bm_pull.c, `local_conns` Range connections) into `<drive>/blz-stage/incoming/<name>.part`; the starter keeps streaming. Complete (every piece, size == catalog size) and the game NOT running: each starter -> `<its drive>/blz-stage/stub/<starter>-off-<stamp>`, `link/<TID>.cfg` -> `.cfg.off-<stamp>`, the image -> `<drive>/homebrew/<name>`; ShadowMount+ `POST /api/v1/scan`. A local image already on the other drive is copied on the console instead (no network) and the old copy deleted once ShadowMount logs `source removed`. |
+| `POST /api/action?do=stream&tid=T` | only when not running and the host lists an image of the title with the SAME size: the image -> `incoming/<name>.remove-<stamp>`; once ShadowMount lets go (`source removed`, `removed stale mount link` or `mount.lnk` gone) the parked starter + cfg come back (checked: fakelib there, cfg streams the same key), else the next pass builds a new starter; then the image is deleted. ShadowMount silent for 10 min with no game open = the image is put back (it still plays). |
+| `POST /api/action?do=lcancel&tid=T` | stops the copy; its staged bytes are deleted; nothing else changes |
+| `GET /api/local` | every record of `/data/blazing/local.tsv` with live progress; `/api/library` rows carry `where` + `lj`, `/api/status` carries `local` |
+
+- Refused at once with the reason (HTTP 400): not enough room (`local_keep_internal_mb` / `local_keep_m2_mb`, 20480 each by
+  default), no M.2, a folder game, a game needing a newer FW with no `backports/<TID>` overlay in the target root, running,
+  another copy going (one at a time), the drives' image differs (back to streaming).
+- While a title has a `local.tsv` record, `sync_once` never builds or rebuilds a starter for it (`local_guard`), on top of
+  `scan_present` seeing the image. Every rename stays on one drive (a cross-drive rename is refused in code).
+- ShadowMount does nothing while any game or app is open (the BlazingMount app counts), so a switch shows on the home screen
+  after closing it; the clocks only run while nothing is open.
+- UI: the phone page on `http://<console>:8094/` (Copy to M.2, Copy to internal, Back to streaming, Move, progress, Cancel)
+  and the app (CROSS on a game: the copy dialog, Stop copy, Back to streaming with Move on SQUARE).
+- Tests: `host/test_local.py` (57 checks, fake imgserve + fake ShadowMount+ API, the payload's own C as a host build).

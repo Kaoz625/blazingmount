@@ -305,6 +305,8 @@ typedef struct {
     int tsnet;                       // 1 = use the tsnet proxy fallback when one is found (default), 0 = never
     char proxy[64]; int proxy_port;  // explicit proxy (else /data/tailscale/config.json httpProxyAddr)
     char server_ts[64]; int server_ts_port;
+    long long local_keep_internal_mb, local_keep_m2_mb;   // v2.14 copy to the console: free space that must stay (bm_local.c)
+    int local_conns;
     int n_only, n_skip, n_first;
     char only[MAX_LIST][40], skip[MAX_LIST][40], first[MAX_LIST][40];
 } conf_t;
@@ -338,6 +340,9 @@ static int fw_hundredths(const char *s) {                           // "13.60" -
 //                        only while /data has >= big_free_mb free and the cap still leaves min_free_mb; otherwise that game gets 0.
 //   big_starter_mb 12000 | big_free_mb 204800   a starter may be up to big_starter_mb when /data has >= big_free_mb free
 //                                              (GoT 9.8 GB, CoD 3.6 GB: Markus wants them back, 23 Oct)
+//   local_keep_internal_mb 20480 | local_keep_m2_mb 20480 | local_conns 8   v2.14 (Markus 8 Nov: "move games from the external drives
+//                        to the internal or the m.2 when i need to"): a copy to the console is refused up front when it would leave
+//                        less than this free (Markus ran /data down to ~3 GB on 7 Nov and every install failed); bm_local.c
 // The v1 one-line form "<ip> <port>" pointed at the old catalog server: its ip is kept, its port ignored (imgserve is :4451).
 static void read_conf(conf_t *c) {
     memset(c, 0, sizeof *c);
@@ -348,6 +353,7 @@ static void read_conf(conf_t *c) {
     strcpy(c->smp_version, BM_SMP_VERSION);
     strcpy(c->homebrew_dir, HOMEBREW_DIR);
     c->auto_update = 1;
+    c->local_keep_internal_mb = 20 * 1024; c->local_keep_m2_mb = 20 * 1024; c->local_conns = 8;
     c->tsnet = 1; strcpy(c->server_ts, BM_DEFAULT_TS_HOST); c->server_ts_port = 0;   // 0 = the imgserve port
     char p[600]; int fd = open(P(p, sizeof p, CONF_PATH), O_RDONLY);
     if (fd < 0) return;
@@ -387,6 +393,9 @@ static void read_conf(conf_t *c) {
                 else { snprintf(c->server_ts, sizeof c->server_ts, "%s", ip); c->server_ts_port = pt; }
             }
         }
+        else if (!strcmp(k, "local_keep_internal_mb")) c->local_keep_internal_mb = atoll(v);
+        else if (!strcmp(k, "local_keep_m2_mb")) c->local_keep_m2_mb = atoll(v);
+        else if (!strcmp(k, "local_conns") && atoi(v) > 0) c->local_conns = atoi(v);
         else if (!strcmp(k, "smp_version")) snprintf(c->smp_version, sizeof c->smp_version, "%s", v);
         else if (!strcmp(k, "poll_secs") && atoi(v) >= 30) c->poll_secs = atoi(v);
         else logf_("mount.conf: unknown setting '%s' ignored", k);
@@ -1053,6 +1062,10 @@ static int sync_once(void) {
         if (listed(c.skip, c.n_skip, g.key, g.tid)) continue;
         int dupe = 0; for (int i = 0; i < ndone; i++) if (!strcmp(done_tids[i], g.tid)) dupe = 1;
         if (dupe) continue;                                         // one starter per title id per pass
+        if (local_guard(g.tid)) {                                   // v2.14: copied to the console (or on its way / back): never a starter
+            present++; strcpy(done_tids[ndone++], g.tid);           // here, never a rebuild over it (bm_local.c); the image counts as present too
+            continue;
+        }
         if (tid_present(g.tid)) {
             present++; strcpy(done_tids[ndone++], g.tid);
             // built by this payload from another image of the same title id = the image on the drive changed: rebuild + safe swap

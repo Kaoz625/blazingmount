@@ -37,6 +37,9 @@
 //                                    PKG Manager is the fallback
 //   POST /api/action?do=<a>&tid=<TID>   a = install | remove | rebuild | hide | unhide | sync | auto&value=0|1 | set&key=K&value=V
 //        | download | remove_local | cancel_dl (v2.8: one line per title in /data/blazing/downloads.tsv for mac1's worker)
+//        | local&to=m2|internal | stream | lcancel   (v2.14, bm_local.c: the console copies the game to its M.2 / internal storage
+//          and switches it to that copy; stream = back to the starter; checked at once: 400 + the reason when it cannot)
+//   GET  /api/local                  v2.14: every local copy BlazingMount made, with live progress
 //        needs header "X-BM-Request: 1" (a web page on another site cannot send it: no cross-site writes)
 //   GET  /api/catalog                the host's /library.json: EVERY game Markus owns on every system (blazingmount host/library)
 //   GET  /api/covers.json            where each cover sits in the sprite sheets (page, cell, colour)
@@ -55,12 +58,15 @@
 #define CHOICES_PATH "/data/blazing/choices.tsv"
 #define ICON_DIR     "/data/blazing/icons"
 #define API_MAXQ     64
+#ifndef LOCAL_TICK_S
+#define LOCAL_TICK_S 5
+#endif
 #ifndef API_WATCH_S
 #define API_WATCH_S  30            // the host's game list is re-read this often: a game added / rebuilt on the drives shows up by itself
 #endif
 
 // ---------------------------------------------------------------- shared state (mutex)
-typedef struct { char what[16], tid[16], key[48], value[256]; } bm_act_t;
+typedef struct { char what[16], tid[16], key[48], value[256]; char name[320], path[700], title[200]; long long size; } bm_act_t;   // v2.14: name..size = bm_local.c
 static pthread_mutex_t g_api_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_api_cv = PTHREAD_COND_INITIALIZER;
 static bm_act_t g_q[API_MAXQ]; static int g_nq;
@@ -93,15 +99,28 @@ static void bm_api_busy(const char *tid, const char *title) {
     pthread_mutex_unlock(&g_api_mu);
 }
 
-// the main loop's sleep: returns early when the app queued something or the host's list changed
+static int local_busy(void); static void local_tick(void);     // bm_local.c (v2.14)
+
+// the main loop's sleep: returns early when the app queued something or the host's list changed. v2.14: while a local copy /
+// switch / back-to-streaming job runs, it wakes every LOCAL_TICK_S to move that job on (the main loop stays the one writer).
 static void bm_api_wait(int secs) {
     if (!g_api_started) { sleep((unsigned)secs); return; }
-    struct timeval now; gettimeofday(&now, NULL);
-    struct timespec until = { now.tv_sec + secs, now.tv_usec * 1000 };
-    pthread_mutex_lock(&g_api_mu);
-    while (!g_wake && !g_nq) if (pthread_cond_timedwait(&g_api_cv, &g_api_mu, &until) != 0) break;
-    g_wake = 0;
-    pthread_mutex_unlock(&g_api_mu);
+    time_t end = time(NULL) + secs;
+    for (;;) {
+        long left = (long)(end - time(NULL));
+        if (left <= 0) break;
+        int busy = local_busy();
+        long chunk = busy && left > LOCAL_TICK_S ? LOCAL_TICK_S : left;
+        struct timeval now; gettimeofday(&now, NULL);
+        struct timespec until = { now.tv_sec + chunk, now.tv_usec * 1000 };
+        int woke = 0;
+        pthread_mutex_lock(&g_api_mu);
+        while (!g_wake && !g_nq) if (pthread_cond_timedwait(&g_api_cv, &g_api_mu, &until) != 0) break;
+        woke = g_wake || g_nq; g_wake = 0;
+        pthread_mutex_unlock(&g_api_mu);
+        if (woke) break;
+        if (busy) local_tick();
+    }
 }
 
 static void api_wake(void) { pthread_mutex_lock(&g_api_mu); g_wake = 1; pthread_cond_signal(&g_api_cv); pthread_mutex_unlock(&g_api_mu); }
@@ -481,6 +500,8 @@ static local_t *active_copy(local_t *lo, int n, const char *tid) {
     }
     return pkg;
 }
+static void local_row(sb_t *o, const char *tid, const local_t *L);   // bm_local.c (v2.14)
+static void local_status(sb_t *o, const conf_t *c);
 static int plays_offline(const local_t *L) { return L && (!strcmp(L->kind, "full") || !strcmp(L->kind, "image") || !strcmp(L->kind, "pkg")); }
 
 // ---------------------------------------------------------------- downloads (docs/DOWNLOAD-TO-CONSOLE.md 3): two small TSV files
@@ -745,6 +766,7 @@ static void api_library(sb_t *o) {
         sb_puts(o, ",\"proof\":"); sb_js(o, proof);
         sb_f(o, ",\"pinned\":%s", L && L->pinned ? "true" : "false");
         api_row_dl(o, g->tid, L, rq, dst);
+        local_row(o, g->tid, L);
         sb_puts(o, "}");
     }
     for (int j = 0; j < g_nloc; j++) {                            // on this console, not (or no longer) on the drives
@@ -774,6 +796,7 @@ static void api_library(sb_t *o) {
         sb_puts(o, ",\"build\":\"\",\"tries\":0,\"reason\":\"\",\"proof\":"); sb_js(o, proof);
         sb_f(o, ",\"pinned\":%s", L->pinned ? "true" : "false");
         api_row_dl(o, L->tid, L, rq, dst);
+        local_row(o, L->tid, L);
         sb_puts(o, "}");
     }
     sb_puts(o, "]}");
@@ -803,7 +826,9 @@ static void api_status(sb_t *o) {
     sb_f(o, ",\"free_mb\":{\"data\":%lld,\"ext0\":%lld,\"ext1\":%lld,\"usb0\":%lld},\"min_free_mb\":%lld,\"fork\":\"%.16s\"",
          dir_free("/data"), dir_free("/mnt/ext0"), dir_free("/mnt/ext1"), dir_free("/mnt/usb0"), c.min_free_mb, BM_FORK_SHA);
     char *st = dl_slurp(DL_STATUS_PATH); dlsum_t d; dl_summary(st, &d); free(st);   // mac1's download helper (DOWNLOAD-TO-CONSOLE.md 4.3)
-    sb_f(o, ",\"dl_rate\":%lld,\"dl_rate_at\":%lld,\"dl_worker_at\":%lld,\"dl_active\":%d}", d.rate, d.rate_at, d.worker_at, d.active);
+    sb_f(o, ",\"dl_rate\":%lld,\"dl_rate_at\":%lld,\"dl_worker_at\":%lld,\"dl_active\":%d", d.rate, d.rate_at, d.worker_at, d.active);
+    local_status(o, &c);                                          // v2.14: copy to M.2 / internal, back to streaming
+    sb_puts(o, "}");
 }
 
 // GET /api/downloads: what mac1's worker polls (every 20 s per console, so it stays small): the app's requests, mac1's own last
@@ -1029,6 +1054,7 @@ static void reply(int s, int code, const char *ctype, const char *body, size_t n
 #include "bm_prof.c"               // v2.12: this console's profile (GET /api/profile, POST /api/profile/set)
 #include "bm_install.c"            // v2.10: BlazingMount installs a PKG itself from the host (GET/POST /api/install, /cancel, /pkgs)
 #include "bm_store.c"              // v2.9: the homebrew store (GET /api/store, POST /api/store/install; its pkgs go to bm_install.c)
+#include "bm_local.c"              // v2.14: copy a game to the M.2 / internal and back to streaming (do=local|stream|lcancel, GET /api/local)
 
 // the keys the app may show and change (= read_conf). type: n number, b 0/1, s text, l list (shown, edited as choices)
 static const struct { const char *k, *type, *help; } k_keys[] = {
@@ -1047,6 +1073,9 @@ static const struct { const char *k, *type, *help; } k_keys[] = {
     { "auto_update", "b", "Keep starters current (new link, changed images rebuilt)" },
     { "poll_secs", "n", "Full check of the drives every (seconds)" },
     { "smp_version", "s", "The ShadowMount+ build starters are proven with" },
+    { "local_keep_internal_mb", "n", "Copy to internal: always leave this much free on console storage (MB)" },
+    { "local_keep_m2_mb", "n", "Copy to M.2: always leave this much free on the M.2 (MB)" },
+    { "local_conns", "n", "Copy to the console: connections" },
     { 0, 0, 0 } };
 
 static void api_settings(sb_t *o) {
@@ -1058,6 +1087,7 @@ static void api_settings(sb_t *o) {
     snprintf(v[i++], 300, "%lld", c.min_free_mb); snprintf(v[i++], 300, "%lld", c.disk_cache_mb); snprintf(v[i++], 300, "%d", c.cache_mb_ram);
     snprintf(v[i++], 300, "%d", c.conns); snprintf(v[i++], 300, "%d", c.readahead_kb); snprintf(v[i++], 300, "%d", c.tsnet); snprintf(v[i++], 300, "%d", c.auto_update);
     snprintf(v[i++], 300, "%d", c.poll_secs); snprintf(v[i++], 300, "%s", c.smp_version);
+    snprintf(v[i++], 300, "%lld", c.local_keep_internal_mb); snprintf(v[i++], 300, "%lld", c.local_keep_m2_mb); snprintf(v[i++], 300, "%d", c.local_conns);
     choices_t *ch = malloc(sizeof *ch); choices_load(ch);
     sb_f(o, "{\"auto\":%d,\"keys\":[", ch->autob);
     free(ch);
@@ -1199,7 +1229,7 @@ static void downloads_set(const char *tid, const char *word) {
 
 // main thread, start of every pass (after read_conf): apply the queue, then fold the choices into this pass's conf
 static void bm_api_pass_begin(conf_t *c) {
-    bm_act_t q[API_MAXQ]; int n;
+    static bm_act_t q[API_MAXQ]; int n;                          // static: 64 actions are ~90 KB (v2.14 fields)
     pthread_mutex_lock(&g_api_mu); n = g_nq; memcpy(q, g_q, sizeof q[0] * (size_t)n); g_nq = 0; pthread_mutex_unlock(&g_api_mu);
     choices_t *ch = malloc(sizeof *ch); choices_load(ch);
     int conf_changed = 0;
@@ -1234,6 +1264,8 @@ static void bm_api_pass_begin(conf_t *c) {
             downloads_set(a->tid, word);
             api_recent("%s %s: asked mac1's download helper", !strcmp(word, "download") ? "download" : !strcmp(word, "cancel") ? "cancel download of"
                        : "remove the local copy of", a->tid);
+        } else if (!strcmp(a->what, "local") || !strcmp(a->what, "stream") || !strcmp(a->what, "lcancel")) {
+            local_apply(c, a);                                    // v2.14 (bm_local.c)
         }
     }
     if (n) choices_save(ch);
@@ -1249,6 +1281,7 @@ static void bm_api_pass_begin(conf_t *c) {
         if (c->n_only == had && c->n_only < MAX_LIST) snprintf(c->only[c->n_only++], 40, "NONE");
     }
     free(ch);
+    local_tick();                                                 // v2.14: a copy / switch / back-to-streaming moves on at once
     bm_api_alerts(c);                                             // wishlist release alerts -> one PS5 notice each (DISCOVER)
     pthread_mutex_lock(&g_api_mu); g_last_pass = time(NULL); g_gen++; pthread_mutex_unlock(&g_api_mu);
 }
@@ -1263,16 +1296,42 @@ static void reply(int s, int code, const char *ctype, const char *body, size_t n
 }
 static void reply_json(int s, int code, sb_t *b) { reply(s, code, "application/json; charset=utf-8", b->b ? b->b : "{}", b->b ? b->n : 2); }
 
-static const char k_page[] =
-    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>BlazingMount</title>"
-    "<style>body{background:#0A0A0B;color:#fffc;font:18px system-ui;margin:16px}h1{color:#fff;font-size:28px}"
-    "td{padding:6px 10px;border-bottom:2px solid #FF3D4733}.s{color:#fff9}button{background:#0E0A0C;color:#fff;border:2px solid #FF3D4733;"
-    "border-radius:16px;padding:6px 12px}button:focus{border-color:#FF3D47}</style><h1>BlazingMount</h1><p class=s id=st></p><table id=t></table>"
-    "<script>const A=(d,t)=>fetch('/api/action?do='+d+'&tid='+t,{method:'POST',headers:{'X-BM-Request':'1'}}).then(L);"
-    "function L(){fetch('/api/status').then(r=>r.json()).then(s=>st.textContent=s.version+' | '+s.route+' | /data free '+s.free_mb.data+' MB'+(s.busy.tid?' | building '+s.busy.title:''));"
-    "fetch('/api/library').then(r=>r.json()).then(j=>{t.innerHTML=j.games.map(g=>`<tr><td>${g.title}<div class=s>${g.tid} ${g.format} ${(g.size/1e9).toFixed(1)} GB</div>"
-    "<td>${g.state}<td>${g.local}<td><button onclick=\"A('install','${g.tid}')\">Install</button> <button onclick=\"A('remove','${g.tid}')\">Remove</button>"
-    " <button onclick=\"A('hide','${g.tid}')\">Hide</button>`).join('')})}L();setInterval(L,3000)</script>";
+static const char k_page[] =   // v2.14: phone-friendly; Copy to M.2 / internal, Back to streaming, progress, Cancel (bm_local.c)
+    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>BlazingMount</title>\n"
+    "<style>:root{--bg:#0A0A0B;--tx:#ffffffcc;--hi:#fff;--dim:#ffffff99;--line:#FF3D4733;--acc:#FF3D47;--good:#4CD48A}\n"
+    "body{background:var(--bg);color:var(--tx);font:16px system-ui;margin:0;padding:16px}h1{color:var(--hi);font-size:26px;margin:0 0 4px}\n"
+    ".s{color:var(--dim);font-size:14px}#q{width:100%;box-sizing:border-box;margin:12px 0;padding:10px;border-radius:12px;border:2px solid var(--line);background:#0E0A0C;color:var(--hi);font-size:16px}\n"
+    ".g{border-bottom:2px solid var(--line);padding:12px 0}.t{color:var(--hi);font-size:18px}.b{display:inline-block;font-size:12px;padding:2px 8px;border:2px solid var(--line);border-radius:10px;margin-left:6px}\n"
+    ".on{border-color:var(--good);color:var(--good)}.m{font-size:14px;margin-top:4px}.e{color:var(--acc)}\n"
+    "button{background:#0E0A0C;color:var(--hi);border:2px solid var(--line);border-radius:14px;padding:10px 14px;margin:8px 8px 0 0;font-size:15px;min-height:44px}\n"
+    "button.p{border-color:var(--acc)}progress{width:100%;height:10px;accent-color:var(--acc)}</style>\n"
+    "<h1>BlazingMount</h1><div class=s id=st></div><input id=q placeholder='Find a game' oninput=R()><div id=t></div>\n"
+    "<script>\n"
+    "let G=[],S={};const E=s=>String(s==null?'':s).replace(/[&<>\"']/g,c=>'&#'+c.charCodeAt(0)+';');\n"
+    "const GB=b=>b>0?(b/1e9).toFixed(1)+' GB':'';\n"
+    "const W={m2:'M.2',internal:'console storage',usb:'USB',ext0:'extended storage'};\n"
+    "function A(d,t,x,ask){if(ask&&!confirm(ask))return;fetch('/api/action?do='+d+'&tid='+t+(x||''),{method:'POST',headers:{'X-BM-Request':'1'}}).then(r=>r.json()).then(j=>{if(!j.ok)alert(j.error||'refused');L()}).catch(()=>alert('BlazingMount did not answer'))}\n"
+    "let Q=[];function C(i){const q=Q[i];A(q[0],q[1],q[2],q[3])}\n"
+    "function B(l,d,t,x,ask,p){const i=Q.push([d,t,x||'',ask||''])-1;return '<button'+(p?' class=p':'')+' onclick=\"C('+i+')\">'+l+'</button>'}\n"
+    "function row(g){const j=g.lj,act=j&&j.active,t=E(g.title);let h='<div class=g><div class=t>'+t;\n"
+    " if(g.on_console)h+='<span class=\"b on\">ON '+E((W[g.where]||'CONSOLE').toUpperCase())+'</span>';else if(g.local=='starter')h+='<span class=b>STREAMS</span>';\n"
+    " h+='</div><div class=s>'+E(g.tid)+' &middot; '+E(g.format)+' &middot; '+GB(g.size)+' &middot; '+E(g.state)+'</div>';\n"
+    " if(act){const p=j.size>0?Math.floor(j.done*100/j.size):0;const v={copying:'Copying',moving:'Moving',ready:'Copied',releasing:'Back to streaming',cancelling:'Stopping'}[j.state]||j.state;\n"
+    "  h+='<div class=m>'+v+' to the '+E(W[j.to]||j.to)+': '+p+'%'+(j.rate>0?' &middot; '+(j.rate/1e6).toFixed(0)+' MB/s &middot; '+Math.ceil(j.eta/60)+' min left':'')+'</div><progress max=100 value='+p+'></progress><div class=s>'+E(j.msg)+'</div>';\n"
+    "  if(j.state=='copying'||j.state=='moving'||j.state=='ready')h+=B('Cancel','lcancel',g.tid,'','Stop copying '+g.title+'? What arrived is deleted; it keeps streaming.');\n"
+    " }else{if(j&&j.msg)h+='<div class=\"m'+(j.state=='failed'?' e':'')+'\">'+E(j.msg)+'</div>';\n"
+    "  if(g.local=='image'){h+=B('Back to streaming','stream',g.tid,'','Back to streaming? The copy on the '+(W[g.where]||'console')+' is deleted ('+GB(g.local_bytes)+') and '+g.title+' streams from your drives again.',1);\n"
+    "   if(g.where=='m2')h+=B('Move to internal','local',g.tid,'&to=internal');else if(S.local&&S.local.m2)h+=B('Move to M.2','local',g.tid,'&to=m2')}\n"
+    "  else if(g.on_drives&&!g.on_console&&g.format!='folder'){if(S.local&&S.local.m2)h+=B('Copy to M.2','local',g.tid,'&to=m2','',1);h+=B('Copy to internal','local',g.tid,'&to=internal','',!(S.local&&S.local.m2))}\n"
+    "  if(g.local=='none'&&g.on_drives)h+=B('Install','install',g.tid);if(g.local=='starter')h+=B('Remove starter','remove',g.tid,'','Remove the starter of '+g.title+'?');\n"
+    "  h+=g.choice=='skip'?B('Show','unhide',g.tid):B('Hide','hide',g.tid)}\n"
+    " return h+'</div>'}\n"
+    "function R(){Q=[];const f=q.value.toLowerCase();const a=G.filter(g=>!f||g.title.toLowerCase().includes(f)||g.tid.toLowerCase().includes(f));\n"
+    " a.sort((x,y)=>((y.lj&&y.lj.active)-(x.lj&&x.lj.active))||x.title.localeCompare(y.title));t.innerHTML=a.map(row).join('')}\n"
+    "function L(){fetch('/api/status').then(r=>r.json()).then(s=>{S=s;const f=s.free_mb||{};st.textContent=s.version+' | '+s.route+' | console storage '+(f.data/1024).toFixed(0)+' GB free'+(f.ext1>0?' | M.2 '+(f.ext1/1024).toFixed(0)+' GB free':'')+(s.busy&&s.busy.tid?' | building '+s.busy.title:'')});\n"
+    " fetch('/api/library').then(r=>r.json()).then(j=>{G=j.games;if(document.activeElement&&document.activeElement.tagName=='BUTTON')return;R()})}\n"
+    "L();setInterval(L,3000)\n"
+    "</script>\n";
 
 static void api_handle(int s) {
     struct timeval tv = { 3, 0 };
@@ -1293,6 +1352,7 @@ static void api_handle(int s) {
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/library")) { api_library(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/settings")) { api_settings(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/downloads")) { api_downloads(&b); reply_json(s, 200, &b); }
+    else if (!strcmp(method, "GET") && !strcmp(target, "/api/local")) { api_local(&b); reply_json(s, 200, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/sha256")) { int code = api_sha256(&b, query); reply_json(s, code, &b); }
     else if (!strcmp(method, "GET") && !strcmp(target, "/api/log")) {
         char v[16]; int n = get_q(query, "lines", v, sizeof v) ? atoi(v) : 200; if (n < 1) n = 1; if (n > 2000) n = 2000;
@@ -1343,7 +1403,11 @@ static void api_handle(int s) {
                 else { sb_f(&b, "{\"ok\":false,\"error\":"); sb_js(&b, st < 0 ? "mac1 did not answer" : st == 404 ? "not a Discover game on mac1" : "mac1 refused it"); sb_puts(&b, "}"); reply_json(s, 502, &b); }
                 free(m); free(b.b); return;
             }
-            const char *err = api_enqueue(what, tid, key, value);
+            const char *err;
+            if (!strcmp(what, "local") || !strcmp(what, "stream") || !strcmp(what, "lcancel")) {   // v2.14: checked here, refused with the reason
+                char to[16] = ""; get_q(query, "to", to, sizeof to);
+                err = local_enqueue(what, tid, to);
+            } else err = api_enqueue(what, tid, key, value);
             if (err) { sb_f(&b, "{\"ok\":false,\"error\":"); sb_js(&b, err); sb_put(&b, "}", 1); reply_json(s, 400, &b); }
             else { sb_f(&b, "{\"ok\":true,\"queued\":"); sb_js(&b, what); sb_put(&b, "}", 1); reply_json(s, 200, &b); }
         }
