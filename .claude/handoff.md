@@ -1,16 +1,18 @@
-# BlazingMount handoff (BLZ-0141) - bm-move lane, 8 Nov 2026 ~11:55 (claude-bm-move)
+# BlazingMount handoff (BLZ-0141) - bm-move lane, 8 Nov 2026 ~14:00 (claude-bm-move)
 
 Working on: Markus 8 Nov "move games from the external drives to the internal or the m.2" = payload 2.14 bm_local.c + app 0.9.0
-Last action: built + host-tested + pushed (7a205f6 payload, e4d8d1e app); NOT deployed - waits for Markus's OK on the one-line plan
-Next step: after OK: ps5-claim PHAT5 claude-bm-move "BlazingMount 2.14 + local copy proof"; swap the pldmgr slot ELF to
-  ~/.blazing/blazingmountd-2.14-e4d8d1e.elf (MacBook, sha256 94432d77f3384a86; old kept .bak), stop the old pid
-  (/data/blazing/blazingmountd.pid), load once; app zip app/out/ps5/BlazingMount-PPSA99280-v0.9.0.zip (sha256 bebdd421...)
-  into /data/homebrew/PPSA99280 while the app is closed (swap FILES inside the folder, then check /system_ex/app eboot size);
-  prove: POST /api/action?do=local&tid=<small streamed game>&to=m2 -> launches from the image (SMP log mount.lnk + 0 imgserve
-  reads) -> do=stream -> starter back -> launches again
+Last action: DEPLOYED on PHAT5 (Markus OK) + PROVEN; PHAT5 released, idle.
+  - blazingmountd 2.14-e4d8d1e live (slot read back sha 94432d77...; old ELF in /data/blz-stage/backup/blazingmountd-1324-20261108-1324)
+  - app 0.9.0 in /data/homebrew/PPSA99280 (files swapped inside the folder; eboot sha 37f722f0...; 0.8.0 in /data/blz-stage/backup/PPSA99280-app-0.8.0-20261108-1325)
+  - Greak PPSA02849: Copy to M.2 1.29 GB ~70 s -> SMP mounted the .ffpfsc -> played in world 59.1 fps, 0 imgserve reads; Back to
+    streaming -> same parked starter + cfg back, image deleted -> streamed again 59.5 fps (4467 reads). Done twice. Shots MacBook
+    ~/.blazing/bm-local-proof-20261108/. Greak now has test saves (File A, maybe File B) on PHAT5 - it had none before.
+Next step: DIGI5 (cross-platform rule): ps5-claim DIGI5 <name> "..."; zsh host/deploy-payload.sh DIGI5 ~/.blazing/blazingmountd-2.14-e4d8d1e.elf <name>
+  (MacBook) + app 0.9.0 the same way (put-tree to /data/blz-stage/incoming/PPSA99280-v090, swap entries inside the live folder);
+  DIGI5 has no M.2: only "Copy to internal" applies there. Not asked yet for DIGI5 - ask the coordinator/Markus first.
 Key files: console/blazingmountd/src/bm_local.c, bm_api.c (wiring + phone page), blazingmountd.c (conf keys, local_guard),
   app/src/bm_app.h, host/test_local.py (57 checks), docs/DOWNLOAD-TO-CONSOLE.md (last section)
-Blockers: Markus's approval of the plan (standing rule); PHAT5 is in use by Metroid Prime 4 + Xbox-shelf agents - ps5-status first
+Blockers: none on PHAT5. Seen: Remote Play on PHAT5 hung after the 12:38 network drop; killing SceRemotePlay once (pldmgr) + ~5 min fixed it.
 
 ---
 
