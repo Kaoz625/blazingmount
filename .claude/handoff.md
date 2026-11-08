@@ -1,3 +1,19 @@
+# BlazingMount handoff (BLZ-0141) - bm-move lane, 8 Nov 2026 ~11:55 (claude-bm-move)
+
+Working on: Markus 8 Nov "move games from the external drives to the internal or the m.2" = payload 2.14 bm_local.c + app 0.9.0
+Last action: built + host-tested + pushed (7a205f6 payload, e4d8d1e app); NOT deployed - waits for Markus's OK on the one-line plan
+Next step: after OK: ps5-claim PHAT5 claude-bm-move "BlazingMount 2.14 + local copy proof"; swap the pldmgr slot ELF to
+  ~/.blazing/blazingmountd-2.14-e4d8d1e.elf (MacBook, sha256 94432d77f3384a86; old kept .bak), stop the old pid
+  (/data/blazing/blazingmountd.pid), load once; app zip app/out/ps5/BlazingMount-PPSA99280-v0.9.0.zip (sha256 bebdd421...)
+  into /data/homebrew/PPSA99280 while the app is closed (swap FILES inside the folder, then check /system_ex/app eboot size);
+  prove: POST /api/action?do=local&tid=<small streamed game>&to=m2 -> launches from the image (SMP log mount.lnk + 0 imgserve
+  reads) -> do=stream -> starter back -> launches again
+Key files: console/blazingmountd/src/bm_local.c, bm_api.c (wiring + phone page), blazingmountd.c (conf keys, local_guard),
+  app/src/bm_app.h, host/test_local.py (57 checks), docs/DOWNLOAD-TO-CONSOLE.md (last section)
+Blockers: Markus's approval of the plan (standing rule); PHAT5 is in use by Metroid Prime 4 + Xbox-shelf agents - ps5-status first
+
+---
+
 # BlazingMount handoff (BLZ-0141)
 
 Working on: DIGI5 "can't see my games" — surface the games + a browsable games section + blazingmountd autoload.
